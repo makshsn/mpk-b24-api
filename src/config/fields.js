@@ -1,14 +1,32 @@
+const LEAD_NEXT_CONTACT_DATETIME_FIELD = 'UF_CRM_1753182274';
+
 module.exports = {
-  // Откуда брать телефон в лиде (первый найденный будет использован)
-  LEAD_PHONE_FIELD_CODES: ['PHONE'],
-
-  // Какие типы телефонов предпочитать (если в PHONE несколько)
+  LEAD_NEXT_CONTACT_DATETIME_FIELD,
+  // --- Контакт из лида по телефону
   PHONE_TYPE_PRIORITY: ['MOBILE', 'WORK', 'HOME', 'OTHER'],
-
-  // Имя контакта берём из поля лида (обычно TITLE)
   CONTACT_NAME_SOURCE_FIELD: 'TITLE',
   CONTACT_DEFAULT_NAME: 'Без имени',
+  CONTACT_PHONE_VALUE_TYPE: 'WORK',
 
-  // Для PHONE в контакте
-  CONTACT_PHONE_VALUE_TYPE: 'WORK', // или MOBILE
+  // --- Заказы (контакт/лид)
+  LEAD_1C_ORDER_FIELD: 'UF_CRM_1754920390989',
+  CONTACT_CLOSED_ORDERS_FIELD: 'UF_CRM_1755163819562',
+  CONTACT_CURRENT_ORDERS_FIELD: 'UF_CRM_1755163800245',
+  CLOSED_ORDERS_SEPARATOR: '\n',
+
+  // --- Пауза по просрочке задачи "Связаться..."
+  LEAD_PREV_STAGE_FIELD: 'UF_CRM_1760532085',
+  LEAD_PAUSE_STAGE_ID: 'UC_79QMBF',
+  LEAD_CONTACT_TASK_ID_FIELD: 'UF_CRM_1753251930',
+  LEAD_NEXT_MEASURE_DATETIME_FIELD: 'UF_CRM_1752486968674',
+
+  // причина паузы (обязательное поле)
+  LEAD_PAUSE_REASON_FIELD: 'UF_CRM_1760525942456',
+  LEAD_PAUSE_REASON_DEFAULT_TEXT: 'Ждём до даты',
+
+  // только с этих стадий можно переводить в паузу
+  LEAD_ALLOWED_STAGES_FOR_PAUSE: ['NEW', 'UC_SBTNES'],
+
+  CONTACT_TASK_TITLE_PREFIX: 'Связаться с клиентом',
+  CONTACT_TASK_OVERDUE_DAYS: 3,
 };

@@ -1,25 +1,20 @@
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const { httpLogger } = require('./middlewares/requestLogger');
 const errorHandler = require('./middlewares/errorHandler');
 const bitrixRoutes = require('./routes/bitrix.routes');
 
 const app = express();
 
+// если у тебя есть nginx — можно оставить, не мешает
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 app.use(httpLogger);
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// ограничение: максимум 60 запросов в минуту на IP
-const apiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-
-app.use('/api/v1', apiLimiter);
+// ВАЖНО: временно убрали express-rate-limit, потому что он валит запросы из-за X-Forwarded-For/trust proxy
 app.use('/api/v1/bitrix', bitrixRoutes);
 
 app.use(errorHandler);
