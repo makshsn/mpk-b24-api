@@ -5,3 +5,16 @@ logs/
 !.env.example
 npm-debug.log*
 .DS_Store
+
+# runtime / logs / generated
+var/
+*.log
+*.log.*
+*.out
+*.pid
+*.gz
+*.jsonl
+pause_*_results.*
+pause_*_summary.*
+nohup*.out
+/tmp/
