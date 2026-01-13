@@ -1,7 +1,0 @@
-==> Start: batch=50, perLead=5s (sleep between calls = 250s)
-[2025-12-19T11:10:49Z] iter=1 {"ok":true,"error":null,"startFrom":101354,"processed":50,"movedToPause":0,"restoredFromPause":0,"commentsToPause":0,"commentsRestore":0,"skippedMeasure":0,"skippedNoTaskId":0,"skippedTaskNotFound":0,"skippedWrongTaskTitle":0,"skippedNoPrevStage":144,"errors":0,"nextCursor":101554}
-==> Start: batch=50, perLead=5s (sleep between calls = 250s)
-[2025-12-19T11:12:57Z] iter=1 {"ok":true,"error":null,"startFrom":101554,"processed":50,"movedToPause":0,"restoredFromPause":0,"commentsToPause":0,"commentsRestore":0,"skippedMeasure":0,"skippedNoTaskId":0,"skippedTaskNotFound":0,"skippedWrongTaskTitle":0,"skippedNoPrevStage":144,"errors":0,"nextCursor":101754}
-==> Start: batch=50, perLead=5s (sleep between calls = 250s)
-[2025-12-19T11:15:00Z] iter=1 {"ok":true,"error":null,"startFrom":101754,"processed":50,"movedToPause":0,"restoredFromPause":0,"commentsToPause":0,"commentsRestore":0,"skippedMeasure":0,"skippedNoTaskId":0,"skippedTaskNotFound":0,"skippedWrongTaskTitle":0,"skippedNoPrevStage":144,"errors":0,"nextCursor":101954}
-[2025-12-19T11:19:12Z] iter=2 {"ok":true,"error":null,"startFrom":0,"processed":50,"movedToPause":11,"restoredFromPause":0,"commentsToPause":11,"commentsRestore":0,"skippedMeasure":0,"skippedNoTaskId":40,"skippedTaskNotFound":1,"skippedWrongTaskTitle":0,"skippedNoPrevStage":36,"errors":0,"nextCursor":150}

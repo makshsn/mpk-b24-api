@@ -1,0 +1,6 @@
+nohup: ignoring input
+==> Audit pause leads. sleep=5s ids_file=var/pause_leads_ids.txt
+==> Writing results: var/pause_audit_results.jsonl
+[skip] bad id line: 'PAUSE=UC_79QMBF count=83'
+==> Done. Building summary: var/pause_audit_summary.txt
+==> Summary ready: var/pause_audit_summary.txt
