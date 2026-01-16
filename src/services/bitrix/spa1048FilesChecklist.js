@@ -354,7 +354,7 @@ async function unzipPdfToDir(zipPath, outDir, { maxFiles = ZIP_MAX_FILES } = {})
         .on('error', reject);
     });
     // 2) Доп. проверка по сигнатуре. Встречаются "pdf"-файлы, которые на деле не PDF.
-    const ok = await isPdfMagicFile(dest);
+    const ok = await isPdfMagicOnDisk(dest);
     if (!ok) {
       await fsp.unlink(dest).catch(() => {});
       continue;
