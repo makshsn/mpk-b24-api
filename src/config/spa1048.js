@@ -1,0 +1,27 @@
+function parseList(v) {
+  if (!v) return [];
+  return String(v)
+    .split(',')
+    .map(s => s.trim())
+    .map(s => s.replace(/^['"]+|['"]+$/g, '')) // снимаем кавычки вокруг
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+module.exports = {
+  entityTypeId: Number(process.env.SPA1048_ENTITY_TYPE_ID || 1048),
+  accountantId: Number(process.env.SPA1048_ACCOUNTANT_ID || 1),
+
+  // ВАЖНО: эти списки теперь парсятся корректно даже если в .env есть кавычки и пробелы
+  stageActive: parseList(process.env.SPA1048_STAGE_ACTIVE),
+  stagePaid: process.env.SPA1048_STAGE_PAID || process.env.SPA1048_STAGE_SUCCESS || '',
+
+  stageFinal: parseList(process.env.SPA1048_STAGE_FINAL),
+
+  // поля SPA
+  deadlineField: 'UF_CRM_8_1768219591855',
+  paidAtField: 'UF_CRM_8_1768219659763',
+  taskIdField: 'UF_CRM_8_TASK_ID',
+  syncAtField: 'UF_CRM_8_SYNC_AT',
+  syncSrcField: 'UF_CRM_8_SYNC_SRC',
+};

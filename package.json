@@ -19,6 +19,7 @@
     "express-rate-limit": "^8.2.1",
     "pino": "^10.1.0",
     "pino-http": "^11.0.0",
+    "unzipper": "^0.12.3",
     "zod": "^4.2.1"
   },
   "devDependencies": {

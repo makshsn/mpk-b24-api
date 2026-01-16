@@ -37,8 +37,8 @@ function methodToJson(method) {
 
 function shouldRetry(err) {
   const status = err?.response?.status;
-  if (status === 429) return true;                // Too Many Requests
-  if (status === 503) return true;                // Service Unavailable
+  if (status === 429) return true;
+  if (status === 503) return true;
   if (status === 502 || status === 504) return true;
   if (!status && (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'EAI_AGAIN')) return true;
   return false;
@@ -49,7 +49,6 @@ function buildError(err, method) {
   const data = err?.response?.data;
   const msg = err?.message || String(err);
 
-  // Bitrix иногда шлёт {error, error_description}
   const bErr = data?.error || data?.ERROR || null;
   const bDesc = data?.error_description || data?.ERROR_DESCRIPTION || null;
 
@@ -65,6 +64,39 @@ function buildError(err, method) {
   return e;
 }
 
+// --- form-url-encoding (важно для UF "Файл") ---
+function addPairs(out, key, val) {
+  if (val === undefined || val === null) return;
+
+  if (Array.isArray(val)) {
+    for (let i = 0; i < val.length; i++) {
+      addPairs(out, `${key}[${i}]`, val[i]);
+    }
+    return;
+  }
+
+  if (typeof val === 'object') {
+    for (const [k, v] of Object.entries(val)) {
+      addPairs(out, `${key}[${k}]`, v);
+    }
+    return;
+  }
+
+  out.push([key, String(val)]);
+}
+
+function toUrlEncoded(params) {
+  const pairs = [];
+  if (params && typeof params === 'object') {
+    for (const [k, v] of Object.entries(params)) {
+      addPairs(pairs, k, v);
+    }
+  }
+  const usp = new URLSearchParams();
+  for (const [k, v] of pairs) usp.append(k, v);
+  return usp;
+}
+
 async function call(method, params = {}) {
   const base = normalizeBaseUrl(pickWebhookBase());
   if (!base) throw new Error('BITRIX_WEBHOOK_BASE is empty');
@@ -72,15 +104,22 @@ async function call(method, params = {}) {
   const m = methodToJson(method);
   const url = `${base}/${m}`;
 
-  const maxRetries = Number(process.env.BITRIX_RETRY_MAX || 6); // 0..6
-  const timeoutMs = Number(process.env.BITRIX_TIMEOUT_MS || 30000);
+  const maxRetries = Number(process.env.BITRIX_RETRY_MAX || 6);
+  const timeoutMs = Number(process.env.BITRIX_TIMEOUT_MS || 60000); // ↑ по умолчанию 60s
 
   let lastErr;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const resp = await axios.post(url, params, { timeout: timeoutMs });
-      // Bitrix обычно возвращает {result: ...}
+      const data = toUrlEncoded(params);
+
+      const resp = await axios.post(url, data, {
+        timeout: timeoutMs,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+
       return resp?.data?.result !== undefined ? resp.data.result : resp.data;
     } catch (err) {
       lastErr = err;
@@ -88,7 +127,6 @@ async function call(method, params = {}) {
         throw buildError(err, method);
       }
 
-      // backoff: 1s, 2s, 4s, 8s... + небольшой джиттер
       const baseDelay = Math.min(30000, 1000 * Math.pow(2, attempt));
       const jitter = Math.floor(Math.random() * 400);
       await sleep(baseDelay + jitter);
