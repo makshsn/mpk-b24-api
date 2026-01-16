@@ -56,6 +56,7 @@ async function getItem(itemId) {
   const r = await bitrix.call('crm.item.get', {
     entityTypeId: cfg.entityTypeId,
     id: Number(itemId),
+    select: ['*'],
   });
   const u = unwrap(r);
   const item = u?.item || u?.result?.item || u?.result || u;

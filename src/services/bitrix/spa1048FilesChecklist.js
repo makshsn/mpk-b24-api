@@ -15,6 +15,7 @@ const F_FILES_PAY_WRITE = process.env.SPA1048_FILES_FIELD_PAY_ORIG || 'UF_CRM_8_
 const ZIP_MAX_FILES = Number(process.env.SPA1048_ZIP_MAX_FILES || 200);
 const ZIP_MAX_PDF_MB = Number(process.env.SPA1048_ZIP_MAX_PDF_MB || 15);
 const ZIP_CHUNK = Number(process.env.SPA1048_ZIP_CHUNK || 4);
+const FILE_URL_TTL_MS = Number(process.env.SPA1048_FILE_URL_TTL_MS || 6 * 60 * 60 * 1000);
 
 function unwrap(resp) {
   return resp?.result ?? resp;
@@ -58,6 +59,68 @@ function fileNameFromContentDisposition(cd) {
   return null;
 }
 
+function fileNameFromFileObject(fileObjOrId) {
+  if (!fileObjOrId || typeof fileObjOrId !== 'object') return null;
+  const candidates = [
+    fileObjOrId.name,
+    fileObjOrId.NAME,
+    fileObjOrId.fileName,
+    fileObjOrId.FILE_NAME,
+    fileObjOrId.originalName,
+    fileObjOrId.ORIGINAL_NAME,
+    fileObjOrId.file_name,
+  ];
+  const hit = candidates.find((x) => typeof x === 'string' && x.trim());
+  return hit ? String(hit).trim() : null;
+}
+
+function extractFileUrl(fileObjOrId) {
+  if (!fileObjOrId || typeof fileObjOrId !== 'object') return null;
+  const candidates = [
+    fileObjOrId.urlMachine,
+    fileObjOrId.url_machine,
+    fileObjOrId.url,
+    fileObjOrId.downloadUrl,
+    fileObjOrId.DOWNLOAD_URL,
+  ];
+  return candidates.find((x) => typeof x === 'string' && x.trim()) || null;
+}
+
+function findFileObjectById(fileId, files) {
+  if (!fileId || !Array.isArray(files)) return null;
+  const id = String(fileId);
+  return files.find((f) => String(normalizeFileToken(f) || '') === id) || null;
+}
+
+const _fileUrlCache = new Map(); // fileId -> { url, ts }
+
+async function resolveFileUrl(fileObjOrId, { files } = {}) {
+  const fileId = normalizeFileToken(fileObjOrId);
+  if (!fileId) return null;
+
+  const direct = extractFileUrl(fileObjOrId);
+  if (direct) return direct;
+
+  const fromList = extractFileUrl(findFileObjectById(fileId, files));
+  if (fromList) return fromList;
+
+  const cached = _fileUrlCache.get(String(fileId));
+  const now = Date.now();
+  if (cached && (now - cached.ts) < FILE_URL_TTL_MS) return cached.url;
+
+  try {
+    const r = await bitrix.call('disk.file.get', { id: Number(fileId) });
+    const data = r?.result || r?.file || r;
+    const url = data?.DOWNLOAD_URL || data?.downloadUrl || data?.URL || data?.url;
+    if (url) {
+      _fileUrlCache.set(String(fileId), { url, ts: now });
+      return url;
+    }
+  } catch (_e) {}
+
+  return null;
+}
+
 function normalizeFileToken(x) {
   if (x == null) return null;
   if (typeof x === 'number') return String(x);
@@ -86,9 +149,12 @@ async function resolveFileName(fileObjOrId) {
   const fileId = normalizeFileToken(fileObjOrId);
   if (!fileId) return null;
 
+  const nameFromObj = fileNameFromFileObject(fileObjOrId);
+  if (nameFromObj) return nameFromObj;
+
   const urlMachine =
     (fileObjOrId && typeof fileObjOrId === 'object')
-      ? (fileObjOrId.urlMachine || fileObjOrId.url_machine || fileObjOrId.url)
+      ? (extractFileUrl(fileObjOrId) || await resolveFileUrl(fileObjOrId))
       : null;
 
   if (urlMachine) {
@@ -152,7 +218,7 @@ function _kindByMagic(buf) {
 
 async function sniffRemoteKind(fileObj) {
   const fid = normalizeFileToken(fileObj);
-  const url = fileObj?.urlMachine || fileObj?.url;
+  const url = await resolveFileUrl(fileObj);
   if (!fid || !url) return { kind: 'other', magic: '' };
 
   const cached = _kindCache.get(String(fid));
@@ -354,7 +420,7 @@ async function unzipPdfToDir(zipPath, outDir, { maxFiles = ZIP_MAX_FILES } = {})
         .on('error', reject);
     });
     // 2) Доп. проверка по сигнатуре. Встречаются "pdf"-файлы, которые на деле не PDF.
-    const ok = await isPdfMagicFile(dest);
+    const ok = await isPdfMagicOnDisk(dest);
     if (!ok) {
       await fsp.unlink(dest).catch(() => {});
       continue;
@@ -398,11 +464,8 @@ async function expandZipAttachments({ entityTypeId, itemId, files }) {
 
     let isZip = isZipName(name);
     if (!isZip) {
-      const url = f?.urlMachine || f?.url_machine || f?.url;
-      if (url) {
-        const kind = await sniffRemoteKind(f);
-        isZip = (kind === 'zip');
-      }
+      const kind = await sniffRemoteKind(f);
+      isZip = (kind === 'zip');
     }
 
     if (isZip) zipObjs.push({ f, fid, name: name || `file_${fid}.zip` });
@@ -418,8 +481,16 @@ async function expandZipAttachments({ entityTypeId, itemId, files }) {
   let uploadedTotal = 0;
 
   for (const z of zipObjs) {
-    const url = z.f?.urlMachine || z.f?.url_machine || z.f?.url;
-    if (!url) continue;
+    let url = await resolveFileUrl(z.f, { files: currentFiles });
+    if (!url) {
+      currentItem = await refetchItem(entityTypeId, itemId);
+      currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
+      url = await resolveFileUrl(z.f, { files: currentFiles });
+    }
+    if (!url) {
+      await addSpaTimelineComment(itemId, `ZIP "${z.name}" не распакован: не удалось получить ссылку для скачивания файла.`);
+      continue;
+    }
 
     try {
       const { uploaded } = await withTempDir('mpkzip', async (dir) => {
