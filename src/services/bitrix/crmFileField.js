@@ -3,8 +3,6 @@ const path = require('path');
 
 const bitrix = require('./bitrixClient');
 
-const _fieldsCache = new Map();
-
 function extractFilesList(value) {
   if (!value) return [];
   return Array.isArray(value) ? value : [value];
@@ -63,34 +61,6 @@ function normalizeFileDataInput(input) {
   return null;
 }
 
-async function fetchCrmItemFields(entityTypeId, client = bitrix) {
-  const key = String(entityTypeId || '');
-  if (_fieldsCache.has(key)) return _fieldsCache.get(key);
-  const res = await client.call('crm.item.fields', { entityTypeId });
-  const fields = res?.result?.fields || res?.fields || res?.result || {};
-  _fieldsCache.set(key, fields);
-  return fields;
-}
-
-function findFieldInfo(fields, fieldName) {
-  if (!fields || !fieldName) return null;
-  if (fields[fieldName]) return fields[fieldName];
-  const lower = String(fieldName).toLowerCase();
-  for (const [name, info] of Object.entries(fields)) {
-    if (String(name).toLowerCase() === lower) return info;
-  }
-  return null;
-}
-
-function isMultipleField(info) {
-  if (!info) return null;
-  if (typeof info.isMultiple === 'boolean') return info.isMultiple;
-  if (typeof info.multiple === 'boolean') return info.multiple;
-  if (typeof info.IS_MULTIPLE === 'string') return info.IS_MULTIPLE === 'Y';
-  if (typeof info.MULTIPLE === 'string') return info.MULTIPLE === 'Y';
-  return null;
-}
-
 function buildPayloadVariants(existingFiles, fileObj) {
   const normalized = normalizeFileDataInput(fileObj);
   if (!normalized) return [];
@@ -98,26 +68,18 @@ function buildPayloadVariants(existingFiles, fileObj) {
   const safeB64 = normalizeBase64(b64);
   const fileDataObj = { fileData: [fileName, safeB64] };
   const fileDataArr = [fileName, safeB64];
-  const existingPayload = extractFilesList(existingFiles);
+  const existingIds = (existingFiles || [])
+    .map((x) => normalizeFileToken(x))
+    .filter((x) => x)
+    .map((x) => Number(x));
 
   return [
     buildUfMultiFilePayload(existingFiles, [fileDataObj]),
-    [...existingPayload, fileDataObj],
-    [...existingPayload, fileDataArr],
+    [...existingIds, fileDataObj],
+    [...existingIds, fileDataArr],
     buildUfMultiFilePayload(existingFiles, [fileDataArr]),
     [fileDataObj],
     [fileDataArr],
-  ];
-}
-
-function buildSinglePayloadVariants(fileObj) {
-  const normalized = normalizeFileDataInput(fileObj);
-  if (!normalized) return [];
-  const [fileName, b64] = normalized;
-  const safeB64 = normalizeBase64(b64);
-  return [
-    { fileData: [fileName, safeB64] },
-    [fileName, safeB64],
   ];
 }
 
@@ -138,11 +100,11 @@ function hasFileChange(existingFiles, nextFiles) {
 
 function buildUfMultiFilePayload(existingArr, newFileDatas) {
   const out = [];
-  const existing = extractFilesList(existingArr);
-  for (const entry of existing) {
-    if (entry && typeof entry === 'object') {
-      out.push(entry);
-    }
+
+  for (const x of (existingArr || [])) {
+    const id = (x && typeof x === 'object') ? (x.id ?? x.ID ?? x.value) : x;
+    const n = Number(id);
+    if (Number.isFinite(n) && n > 0) out.push({ id: n });
   }
 
   for (const fd of (newFileDatas || [])) {
@@ -181,12 +143,7 @@ async function appendFileObjectToCrmItemField({
   const item = await fetchCrmItem({ entityTypeId, itemId, client });
   const existingFiles = extractFilesList(item?.[fieldRead]);
   const keepIds = collectExistingFileIds(item, fieldRead);
-  const fields = await fetchCrmItemFields(entityTypeId, client);
-  const fieldInfo = findFieldInfo(fields, fieldWrite) || findFieldInfo(fields, fieldRead);
-  const multiple = isMultipleField(fieldInfo);
-  const variants = multiple === false
-    ? buildSinglePayloadVariants(fileObj)
-    : buildPayloadVariants(existingFiles, fileObj);
+  const variants = buildPayloadVariants(existingFiles, fileObj);
   const fieldNames = fieldWrite === fieldRead ? [fieldWrite] : [fieldWrite, fieldRead];
 
   let lastRes = null;
@@ -233,13 +190,9 @@ module.exports = {
   extractFilesList,
   normalizeBase64,
   normalizeFileToken,
-  fetchCrmItemFields,
-  findFieldInfo,
-  isMultipleField,
   fetchCrmItem,
   collectExistingFileIds,
   buildPayloadVariants,
-  buildSinglePayloadVariants,
   buildUfMultiFilePayload,
   buildFileDataFromPath,
   appendFileObjectToCrmItemField,
