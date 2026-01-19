@@ -8,11 +8,6 @@ function extractFilesList(value) {
   return Array.isArray(value) ? value : [value];
 }
 
-function normalizeBase64(b64) {
-  const s = String(b64 || '');
-  return s.replace(/^data:[^;]+;base64,/, '');
-}
-
 function normalizeFileToken(x) {
   if (x == null) return null;
   if (typeof x === 'number') return String(x);
@@ -45,42 +40,6 @@ function collectExistingFileIds(item, fieldRead) {
   return ids;
 }
 
-function normalizeFileDataInput(input) {
-  if (!input) return null;
-  if (Array.isArray(input) && input.length >= 2) {
-    return [input[0], input[1]];
-  }
-  if (typeof input === 'object') {
-    if (Array.isArray(input.fileData) && input.fileData.length >= 2) {
-      return [input.fileData[0], input.fileData[1]];
-    }
-    if (input.fileName && input.b64) {
-      return [input.fileName, input.b64];
-    }
-  }
-  return null;
-}
-
-function buildUfMultiFilePayload(existingArr, newFileDatas) {
-  const out = [];
-
-  for (const x of (existingArr || [])) {
-    const id = (x && typeof x === 'object') ? (x.id ?? x.ID ?? x.value) : x;
-    const n = Number(id);
-    if (Number.isFinite(n) && n > 0) out.push({ id: n });
-  }
-
-  for (const fd of (newFileDatas || [])) {
-    const data = normalizeFileDataInput(fd);
-    if (!data) continue;
-    const name = data[0] || 'file.bin';
-    const b64 = normalizeBase64(data[1] || '');
-    out.push({ fileData: [name, b64] });
-  }
-
-  return out;
-}
-
 async function buildFileDataFromPath(filePath) {
   const buf = await fs.readFile(filePath);
   const b64 = buf.toString('base64');
@@ -104,14 +63,12 @@ async function appendFileObjectToCrmItemField({
   if (!fileObj) throw new Error('fileObj is required');
 
   const item = await fetchCrmItem({ entityTypeId, itemId, client });
-  const existingFiles = extractFilesList(item?.[fieldRead]);
   const keepIds = collectExistingFileIds(item, fieldRead);
-  const payload = buildUfMultiFilePayload(existingFiles, [fileObj]);
 
   const res = await client.call('crm.item.update', {
     entityTypeId,
     id: itemId,
-    fields: { [fieldWrite]: payload },
+    fields: { [fieldWrite]: [...keepIds, fileObj] },
   });
 
   return { keepIds, response: res };
@@ -140,11 +97,9 @@ async function appendFileFromPathToCrmItemField({
 
 module.exports = {
   extractFilesList,
-  normalizeBase64,
   normalizeFileToken,
   fetchCrmItem,
   collectExistingFileIds,
-  buildUfMultiFilePayload,
   buildFileDataFromPath,
   appendFileObjectToCrmItemField,
   appendFileFromPathToCrmItemField,
