@@ -360,10 +360,7 @@ async function updateItemStagePaid(itemId) {
 
   const r = logInfo('ZIP_FIELD_UPDATE_START', { entityTypeId, itemId, field: F_FILES_PAY_WRITE || F_FILES_PAY_READ });
 try {
-  let updRes = null;
-  try {
-    updRes = await bitrix.call('crm.item.update', {
-
+  await bitrix.call('crm.item.update', {
     entityTypeId: cfg.entityTypeId,
     id: Number(itemId),
     fields: {
@@ -371,17 +368,7 @@ try {
       ufCrm8SyncAt: nowIso(),
       ufCrm8SyncSrc: 'server_paid_by_checklist',
     },
-    });
-    const keys = updRes ? Object.keys(updRes) : [];
-    logZip('zip-upload-part-ok', { itemId, fid: z.fid, add: fileDatas.length, respKeys: keys.slice(0, 12) });
-  } catch (e) {
-    const status = e?.status || e?.response?.status || null;
-    const data = e?.data || e?.response?.data || null;
-    const errCode = data?.error || null;
-    const errDesc = data?.error_description || null;
-    logZip('zip-upload-part-fail', { itemId, fid: z.fid, add: fileDatas.length, status, errCode, errDesc, msg: String(e?.message||e).slice(0,300) });
-    throw e;
-  }
+  });
   logInfo('ZIP_FIELD_UPDATE_OK', { entityTypeId, itemId });
 } catch (err) {
   logError('ZIP_FIELD_UPDATE_FAIL', { entityTypeId, itemId, err: serializeError(err) });
@@ -487,7 +474,7 @@ function buildUfMultiFilePayload(existingIds, newFileDatas, mode = 'num') {
     const name = fd[0] || 'file.pdf';
     let b64 = String(fd[1] || '');
     b64 = b64.replace(/^data:[^;]+;base64,/, '');
-    out.push([name, b64]);
+    out.push({ fileData: [name, b64] });
   }
 
   return out;
@@ -557,11 +544,6 @@ async function expandZipAttachments({ entityTypeId, itemId, files }) {
     if (!url) {
       currentItem = await refetchItem(entityTypeId, itemId);
       currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
-      const afterCount = (currentFiles || []).length;
-      logZip('zip-upload-part-after', { itemId, fid: z.fid, beforeCount, afterCount, delta: afterCount - beforeCount });
-      if (afterCount <= beforeCount) {
-        logZip('zip-upload-part-no-effect', { itemId, fid: z.fid, keep: (keepIds||[]).length, add: (fileDatas||[]).length });
-      }
       try {
         url = await resolveFileUrl(z.f, { files: currentFiles });
       } catch (_) {
@@ -588,9 +570,7 @@ async function expandZipAttachments({ entityTypeId, itemId, files }) {
 
         if (!pdfPaths.length) return { uploaded: 0 };
 
-        const chunkSize = (Number(ZIP_CHUNK) > 0 ? Number(ZIP_CHUNK) : 1);
-        const pdfChunks = chunk(pdfPaths, chunkSize);
-        logZip('zip-chunks', { itemId, fid: z.fid, pdfCount: (pdfPaths||[]).length, chunkSize, chunks: (pdfChunks||[]).length });
+        const pdfChunks = chunk(pdfPaths, ZIP_CHUNK);
         logZip('zip-chunks', { itemId, fid: z.fid, chunks: pdfChunks.length, chunkSize: ZIP_CHUNK });
 
         let localUploaded = 0;
