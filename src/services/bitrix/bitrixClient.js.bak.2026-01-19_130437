@@ -54,7 +54,6 @@ function shouldRetry(err) {
   e.status = status;
   e.data = data;
   e.method = method;
-  if (ctx) e.ctx = ctx;
   return e;
 }
 
@@ -164,7 +163,7 @@ function toUrlEncoded(params) {
   return usp;
 }
 
-async function call(method, params = {}, opts = {}) {
+async function call(method, params = {}) {
   const base = normalizeBaseUrl(pickWebhookBase());
   if (!base) throw new Error('BITRIX_WEBHOOK_BASE is empty');
 
@@ -212,7 +211,6 @@ async function call(method, params = {}, opts = {}) {
         status,
         headers: process.env.BITRIX_LOG_HEADERS === '1' ? sanitize(resp?.headers || {}) : undefined,
         body: process.env.BITRIX_LOG_BODY === '1' ? sanitize(body) : undefined,
-        ctx: opts?.ctx,
       });
 
       // Bitrix может вернуть 200, но с error/error_description
@@ -237,7 +235,6 @@ async function call(method, params = {}, opts = {}) {
         ms,
         status,
         keys: body ? Object.keys(body) : [],
-        ctx: opts?.ctx,
       });
 
       return body?.result !== undefined ? body.result : body;
@@ -259,7 +256,7 @@ async function call(method, params = {}, opts = {}) {
 
       // ретраи только на сетевые/лимиты
       if (!shouldRetry(err) || attempt === maxRetries) {
-        throw buildError(err, method, opts?.ctx);
+        throw buildError(err, method);
       }
 
       const baseDelay = Math.min(30000, 1000 * Math.pow(2, attempt));
@@ -268,7 +265,7 @@ async function call(method, params = {}, opts = {}) {
     }
   }
 
-  throw buildError(lastErr, method, opts?.ctx);
+  throw buildError(lastErr, method);
 }
 
 module.exports = { call };
