@@ -1,6 +1,5 @@
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
-const { syncFilesChecklistAndMaybeClose } = require('./spa1048FilesChecklist');
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
@@ -345,7 +344,6 @@ async function handleSpaEvent(req) {
         [F_SYNC_AT]: nowIso(),
         [F_SYNC_SRC]: 'server_task_recreate',
       });
-            const checklist = await syncFilesChecklistAndMaybeClose({ itemId, taskId: created.taskId, item, stageId });
 
       return {
         ok: true,
@@ -392,7 +390,6 @@ async function handleSpaEvent(req) {
         [F_SYNC_SRC]: 'server_task_deadline_sync',
       });
 
-            const checklist = await syncFilesChecklistAndMaybeClose({ itemId, taskId, item, stageId });
 
       return {
         ok: true,
@@ -408,7 +405,6 @@ async function handleSpaEvent(req) {
       };
     }
 
-        const checklist = await syncFilesChecklistAndMaybeClose({ itemId, taskId, item, stageId });
 
     return { ok: true, itemId, stageId, deadline: deadlineYmd, ensuredDeadline, action: 'no_change', taskId, checklist };
   }
@@ -422,7 +418,6 @@ async function handleSpaEvent(req) {
     [F_SYNC_SRC]: 'server_task_create',
   });
 
-    const checklist = await syncFilesChecklistAndMaybeClose({ itemId, taskId: created.taskId, item, stageId });
 
   return {
     ok: true,

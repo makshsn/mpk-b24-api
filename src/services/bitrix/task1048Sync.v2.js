@@ -1,6 +1,5 @@
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
-const { syncFilesChecklistAndMaybeClose } = require('./spa1048FilesChecklist');
 
 // ВАЖНО: в crm.item.get поля приходят camelCase
 const F_DEADLINE = 'ufCrm8_1768219591855'; // крайний срок оплаты
@@ -192,7 +191,6 @@ async function handleTaskEvent(req) {
   }
 
   // моментальная проверка чеклиста при любом обновлении задачи (в т.ч. клики по чеклисту)
-  const checklist = await syncFilesChecklistAndMaybeClose({ itemId, taskId, item, stageId: item.stageId || item.STAGE_ID });
   if (checklist?.closed) {
     return { ok: true, action: 'paid_by_checklist', taskId, itemId, checklist };
   }
