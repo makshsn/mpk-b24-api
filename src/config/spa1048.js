@@ -24,4 +24,8 @@ module.exports = {
   taskIdField: 'UF_CRM_8_TASK_ID',
   syncAtField: 'UF_CRM_8_SYNC_AT',
   syncSrcField: 'UF_CRM_8_SYNC_SRC',
+
+  // Файлы счёта на оплату (UF множественное)
+  filesField: 'UF_CRM_8_1768219060503',
+  filesFieldCamel: 'ufCrm8_1768219060503',
 };
