@@ -37,9 +37,17 @@ function methodToJson(method) {
 }
 
 function shouldRetry(err) {
-    // Sometimes we throw our own Error with {status,data} (no err.response)
-  const status = err?.response?.status ?? err?.status;
-  const data = err?.response?.data ?? err?.data;
+  const status = err?.response?.status;
+  if (status === 429) return true;
+  if (status === 503) return true;
+  if (status === 502 || status === 504) return true;
+  if (!status && (err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'EAI_AGAIN')) return true;
+  return false;
+}
+
+function buildError(err, method) {
+  const status = err?.response?.status;
+  const data = err?.response?.data;
   const msg = err?.message || String(err);
 
   const bErr = data?.error || data?.ERROR || null;
