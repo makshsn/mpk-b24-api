@@ -569,8 +569,6 @@ for (const z of zipObjs) {
           if (!ZIP_CHUNK || Number(ZIP_CHUNK) < 1) throw new Error('ZIP_CHUNK must be >= 1');
         let localUploaded = 0;
 
-          const beforeIds = new Set();
-
           // ids, которые были в поле ДО распаковки (чтобы потом не удалить старые не-PDF)
           for (const f of currentFiles) {
             const fid0 = normalizeFileToken(f);

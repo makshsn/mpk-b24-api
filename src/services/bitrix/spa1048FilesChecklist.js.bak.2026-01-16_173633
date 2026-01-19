@@ -565,11 +565,7 @@ for (const z of zipObjs) {
 
         const pdfChunks = chunk(pdfPaths, ZIP_CHUNK);
 
-          logZip('zip-chunks', { itemId, fid: z.fid, zipChunk: ZIP_CHUNK, chunks: Array.isArray(pdfChunks) ? pdfChunks.length : null });
-          if (!ZIP_CHUNK || Number(ZIP_CHUNK) < 1) throw new Error('ZIP_CHUNK must be >= 1');
         let localUploaded = 0;
-
-          const beforeIds = new Set();
 
           // ids, которые были в поле ДО распаковки (чтобы потом не удалить старые не-PDF)
           for (const f of currentFiles) {
@@ -591,13 +587,7 @@ for (const z of zipObjs) {
             if (!st) continue;
             if (st.size > ZIP_MAX_PDF_MB * 1024 * 1024) continue;
 
-            let buf;
-            try {
-              buf = await fsp.readFile(pdfPath);
-            } catch (e) {
-              logZip('zip-pdf-read-fail', { itemId, fid: z.fid, pdfPath, err: String(e?.message || e).slice(0, 200) });
-              continue;
-            }
+            const buf = await fsp.readFile(pdfPath);
             const b64 = buf.toString('base64');
             const fileName = path.basename(pdfPath);
             fileDatas.push([fileName, b64]);
@@ -635,7 +625,6 @@ for (const z of zipObjs) {
       uploadedTotal += uploaded;
     } catch (e) {
       const msg = e?.response?.data?.error_description || e?.message || String(e);
-        logZip('zip-error', { itemId, fid: z?.fid, name: z?.name, msg: String(msg).slice(0, 300), stack: String(e?.stack || '').slice(0, 900) });
       await addSpaTimelineComment(itemId, `ZIP распаковка: ошибка при добавлении PDF из "${z.name}": ${String(msg).slice(0, 180)}. ZIP оставлен.`);
       // при ошибке — не продолжаем удаление ZIP
       return { changed: false, files: input, error: msg };

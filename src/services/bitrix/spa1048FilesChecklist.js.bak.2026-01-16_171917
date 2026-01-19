@@ -470,29 +470,6 @@ async function refetchItem(entityTypeId, itemId) {
  * - после успеха удаляем ZIP из поля, оставляя только PDF/остальные файлы
  */
 async function expandZipAttachments({ entityTypeId, itemId, files }) {
-
-function buildUfMultiFilePayload(existingArr, newFileDatas) {
-  const out = [];
-
-  // existing: объекты файлов из Bitrix (у них обычно есть .id)
-  for (const x of (existingArr || [])) {
-    const id = (x && typeof x === 'object') ? (x.id ?? x.ID ?? x.value) : x;
-    const n = Number(id);
-    if (Number.isFinite(n) && n > 0) out.push({ id: n });
-  }
-
-  // newFileDatas: массив пар [name, base64]
-  for (const fd of (newFileDatas || [])) {
-    if (!fd) continue;
-    const name = fd[0] || 'file.pdf';
-    let b64 = String(fd[1] || '');
-    b64 = b64.replace(/^data:[^;]+;base64,/, '');
-    out.push({ fileData: [name, b64] });
-  }
-
-  return out;
-}
-
   const input = Array.isArray(files) ? files : [];
   if (!input.length) return { changed: false, files: input };
 
@@ -531,13 +508,6 @@ for (const z of zipObjs) {
     if (!url) {
       currentItem = await refetchItem(entityTypeId, itemId);
       currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
-
-            const afterCount = (currentFiles || []).length;
-            if (afterCount <= beforeCount) {
-              logZip('zip-upload-no-effect', { itemId, beforeCount, afterCount, triedAdd: fileDatas.length });
-              await addSpaTimelineComment(itemId, `ZIP распаковка: Bitrix вернул 200 OK, но PDF не добавились (попытка ${fileDatas.length}). ZIP оставлен.`);
-              return { changed: false, files: input, error: 'no_effect_update' };
-            }
       url = await resolveFileUrl(z.f, { files: currentFiles });
     }
     if (!url) {
@@ -551,31 +521,14 @@ for (const z of zipObjs) {
         const outDir = path.join(dir, 'out');
         await fsp.mkdir(outDir, { recursive: true });
 
-        logZip('zip-download-start', { itemId, fid: z.fid, name: z.name, url });
         await downloadToFile(url, zipPath);
-        try {
-          const stZip = await fsp.stat(zipPath).catch(() => null);
-          logZip('zip-downloaded', { itemId, fid: z.fid, bytes: stZip ? stZip.size : null, path: zipPath });
-        } catch (e) {}
-
         const pdfPaths = await unzipPdfToDir(zipPath, outDir, { maxFiles: ZIP_MAX_FILES });
-        logZip('zip-unzipped', { itemId, fid: z.fid, pdfCount: Array.isArray(pdfPaths) ? pdfPaths.length : 0, outDir });
 
         if (!pdfPaths.length) return { uploaded: 0 };
 
         const pdfChunks = chunk(pdfPaths, ZIP_CHUNK);
 
-          logZip('zip-chunks', { itemId, fid: z.fid, zipChunk: ZIP_CHUNK, chunks: Array.isArray(pdfChunks) ? pdfChunks.length : null });
-          if (!ZIP_CHUNK || Number(ZIP_CHUNK) < 1) throw new Error('ZIP_CHUNK must be >= 1');
         let localUploaded = 0;
-
-          const beforeIds = new Set();
-
-          // ids, которые были в поле ДО распаковки (чтобы потом не удалить старые не-PDF)
-          for (const f of currentFiles) {
-            const fid0 = normalizeFileToken(f);
-            if (fid0) beforeIds.add(String(Number(fid0)));
-          }
 
         for (const part of pdfChunks) {
           // ids того что уже лежит в поле (включая ZIP пока)
@@ -591,13 +544,7 @@ for (const z of zipObjs) {
             if (!st) continue;
             if (st.size > ZIP_MAX_PDF_MB * 1024 * 1024) continue;
 
-            let buf;
-            try {
-              buf = await fsp.readFile(pdfPath);
-            } catch (e) {
-              logZip('zip-pdf-read-fail', { itemId, fid: z.fid, pdfPath, err: String(e?.message || e).slice(0, 200) });
-              continue;
-            }
+            const buf = await fsp.readFile(pdfPath);
             const b64 = buf.toString('base64');
             const fileName = path.basename(pdfPath);
             fileDatas.push([fileName, b64]);
@@ -607,13 +554,11 @@ for (const z of zipObjs) {
           if (!fileDatas.length) continue;
 
           // добавляем PDF (ZIP остаётся, чтобы поле не было пустым)
-            const beforeCount = (currentFiles || []).length;
           const beforeIds = new Set(keepIds.map((x) => String(x)));
-          logZip('zip-upload-part', { itemId, keep: currentFiles.length, add: fileDatas.length });
           await bitrix.call('crm.item.update', {
             entityTypeId: Number(entityTypeId),
             id: Number(itemId),
-            fields: { [F_FILES_PAY_WRITE]: buildUfMultiFilePayload(currentFiles, fileDatas) },
+            fields: { [F_FILES_PAY_WRITE]: [...keepIds, ...fileDatas] },
           });
 
           // перечитываем
@@ -635,7 +580,6 @@ for (const z of zipObjs) {
       uploadedTotal += uploaded;
     } catch (e) {
       const msg = e?.response?.data?.error_description || e?.message || String(e);
-        logZip('zip-error', { itemId, fid: z?.fid, name: z?.name, msg: String(msg).slice(0, 300), stack: String(e?.stack || '').slice(0, 900) });
       await addSpaTimelineComment(itemId, `ZIP распаковка: ошибка при добавлении PDF из "${z.name}": ${String(msg).slice(0, 180)}. ZIP оставлен.`);
       // при ошибке — не продолжаем удаление ZIP
       return { changed: false, files: input, error: msg };
@@ -669,7 +613,7 @@ if (uploadedTotal <= 0) {
       await bitrix.call('crm.item.update', {
         entityTypeId: Number(entityTypeId),
         id: Number(itemId),
-        fields: { [F_FILES_PAY_WRITE]: finalIds.map((id) => ({ id })) },
+        fields: { [F_FILES_PAY_WRITE]: finalIds },
       });
     }
 
