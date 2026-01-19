@@ -12,7 +12,7 @@ const { logDebug, logInfo, logWarn, logError, serializeError } = require('../../
 // В crm.item.get UF-файлы приходят в camelCase:
 const F_FILES_PAY_READ = process.env.SPA1048_FILES_FIELD_PAY_CAMEL || 'ufCrm8_1768219060503';
 // Для update надёжнее использовать оригинальное имя:
-const F_FILES_PAY_WRITE = process.env.SPA1048_FILES_FIELD_PAY_ORIG || 'UF_CRM_8_1768219060503';
+const F_FILES_PAY_WRITE = process.env.SPA1048_FILES_FIELD_PAY_ORIG || process.env.SPA1048_FILES_FIELD_PAY_CAMEL || 'ufCrm8_1768219060503';
 
 const ZIP_MAX_FILES = Number(process.env.SPA1048_ZIP_MAX_FILES || 200);
 const ZIP_MAX_PDF_MB = Number(process.env.SPA1048_ZIP_MAX_PDF_MB || 15);
@@ -360,7 +360,10 @@ async function updateItemStagePaid(itemId) {
 
   const r = logInfo('ZIP_FIELD_UPDATE_START', { entityTypeId, itemId, field: F_FILES_PAY_WRITE || F_FILES_PAY_READ });
 try {
-  await bitrix.call('crm.item.update', {
+  let updRes = null;
+  try {
+    updRes = await bitrix.call('crm.item.update', {
+
     entityTypeId: cfg.entityTypeId,
     id: Number(itemId),
     fields: {
@@ -368,7 +371,17 @@ try {
       ufCrm8SyncAt: nowIso(),
       ufCrm8SyncSrc: 'server_paid_by_checklist',
     },
-  });
+    });
+    const keys = updRes ? Object.keys(updRes) : [];
+    logZip('zip-upload-part-ok', { itemId, fid: z.fid, add: fileDatas.length, respKeys: keys.slice(0, 12) });
+  } catch (e) {
+    const status = e?.status || e?.response?.status || null;
+    const data = e?.data || e?.response?.data || null;
+    const errCode = data?.error || null;
+    const errDesc = data?.error_description || null;
+    logZip('zip-upload-part-fail', { itemId, fid: z.fid, add: fileDatas.length, status, errCode, errDesc, msg: String(e?.message||e).slice(0,300) });
+    throw e;
+  }
   logInfo('ZIP_FIELD_UPDATE_OK', { entityTypeId, itemId });
 } catch (err) {
   logError('ZIP_FIELD_UPDATE_FAIL', { entityTypeId, itemId, err: serializeError(err) });
@@ -453,10 +466,33 @@ async function unzipPdfToDir(zipPath, outDir, { maxFiles = ZIP_MAX_FILES } = {})
 }
 
 function chunk(arr, n) {
+  const step = Number(n);
+  if (!Number.isFinite(step) || step <= 0) return [arr];
   const out = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
+  for (let i = 0; i < arr.length; i += step) out.push(arr.slice(i, i + step));
   return out;
 }
+
+function buildUfMultiFilePayload(existingIds, newFileDatas, mode = 'num') {
+  const out = [];
+
+  for (const x of (existingIds || [])) {
+    const n = Number(x);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    out.push(mode === 'obj' ? { id: n } : n);
+  }
+
+  for (const fd of (newFileDatas || [])) {
+    if (!fd) continue;
+    const name = fd[0] || 'file.pdf';
+    let b64 = String(fd[1] || '');
+    b64 = b64.replace(/^data:[^;]+;base64,/, '');
+    out.push([name, b64]);
+  }
+
+  return out;
+}
+
 
 async function refetchItem(entityTypeId, itemId) {
   const r = await bitrix.call('crm.item.get', { entityTypeId: Number(entityTypeId), id: Number(itemId), select: ['*'] });
@@ -471,77 +507,70 @@ async function refetchItem(entityTypeId, itemId) {
  */
 async function expandZipAttachments({ entityTypeId, itemId, files }) {
 
-function buildUfMultiFilePayload(existingArr, newFileDatas) {
-  const out = [];
-
-  // existing: объекты файлов из Bitrix (у них обычно есть .id)
-  for (const x of (existingArr || [])) {
-    const id = (x && typeof x === 'object') ? (x.id ?? x.ID ?? x.value) : x;
-    const n = Number(id);
-    if (Number.isFinite(n) && n > 0) out.push({ id: n });
-  }
-
-  // newFileDatas: массив пар [name, base64]
-  for (const fd of (newFileDatas || [])) {
-    if (!fd) continue;
-    const name = fd[0] || 'file.pdf';
-    let b64 = String(fd[1] || '');
-    b64 = b64.replace(/^data:[^;]+;base64,/, '');
-    out.push({ fileData: [name, b64] });
-  }
-
-  return out;
-}
-
   const input = Array.isArray(files) ? files : [];
   if (!input.length) return { changed: false, files: input };
 
+  // 1) находим ZIP-ы
   const zipObjs = [];
   for (const f of input) {
     const fid = normalizeFileToken(f);
     if (!fid) continue;
-    // Имя файла может быть недоступно в ответе crm.item.get. Поэтому:
-    // 1) пытаемся получить имя (если есть)
-    // 2) если по имени не понятно — нюхаем первые байты по urlMachine
+
     let name = '';
     try { name = await resolveFileName(f); } catch (_) { /* ignore */ }
 
     let isZip = isZipName(name);
     if (!isZip) {
-      const kind = await sniffRemoteKind(f);
-      isZip = (kind === 'zip');
+      try {
+        const kind = await sniffRemoteKind(f);
+        isZip = (kind === 'zip');
+      } catch (_) {}
     }
 
     if (isZip) zipObjs.push({ f, fid, name: name || `file_${fid}.zip` });
   }
   if (!zipObjs.length) return { changed: false, files: input };
 
-  // Текущий набор id (включая ZIP) — чтобы поле не стало пустым
+  // 2) текущее состояние
   let currentItem = await refetchItem(entityTypeId, itemId);
   let currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
 
-  const zipIds = new Set(zipObjs.map(z => String(z.fid)));
+  const zipIds = new Set(zipObjs.map((z) => String(Number(z.fid))));
+  const beforeIds = new Set(
+    (currentFiles || []).map(normalizeFileToken).filter(Boolean).map((x) => String(Number(x)))
+  );
+
+  logZip('zip-found', { itemId, zipCount: zipObjs.length, currentCount: currentFiles.length });
 
   let uploadedTotal = 0;
 
-  
-      logZip('zip-start', { itemId, zipCount: zipObjs.length });
-for (const z of zipObjs) {
-    let url = await resolveFileUrl(z.f, { files: currentFiles });
+  // 3) распаковка + аплоад PDF
+  for (const z of zipObjs) {
+    // Иногда urlMachine отсутствует — пробуем перечитать item
+    let url = null;
+    try {
+      url = await resolveFileUrl(z.f, { files: currentFiles });
+    } catch (_) {
+      url = null;
+    }
+
     if (!url) {
       currentItem = await refetchItem(entityTypeId, itemId);
       currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
-
-            const afterCount = (currentFiles || []).length;
-            if (afterCount <= beforeCount) {
-              logZip('zip-upload-no-effect', { itemId, beforeCount, afterCount, triedAdd: fileDatas.length });
-              await addSpaTimelineComment(itemId, `ZIP распаковка: Bitrix вернул 200 OK, но PDF не добавились (попытка ${fileDatas.length}). ZIP оставлен.`);
-              return { changed: false, files: input, error: 'no_effect_update' };
-            }
-      url = await resolveFileUrl(z.f, { files: currentFiles });
+      const afterCount = (currentFiles || []).length;
+      logZip('zip-upload-part-after', { itemId, fid: z.fid, beforeCount, afterCount, delta: afterCount - beforeCount });
+      if (afterCount <= beforeCount) {
+        logZip('zip-upload-part-no-effect', { itemId, fid: z.fid, keep: (keepIds||[]).length, add: (fileDatas||[]).length });
+      }
+      try {
+        url = await resolveFileUrl(z.f, { files: currentFiles });
+      } catch (_) {
+        url = null;
+      }
     }
+
     if (!url) {
-      await addSpaTimelineComment(itemId, `ZIP "${z.name}" не распакован: не удалось получить ссылку для скачивания файла.`);
+      await addSpaTimelineComment(itemId, `ZIP "${z.name}" не распакован: не удалось получить ссылку для скачивания.`);
       continue;
     }
 
@@ -551,39 +580,33 @@ for (const z of zipObjs) {
         const outDir = path.join(dir, 'out');
         await fsp.mkdir(outDir, { recursive: true });
 
-        logZip('zip-download-start', { itemId, fid: z.fid, name: z.name, url });
+        logZip('zip-download-start', { itemId, fid: z.fid, name: z.name });
         await downloadToFile(url, zipPath);
-        try {
-          const stZip = await fsp.stat(zipPath).catch(() => null);
-          logZip('zip-downloaded', { itemId, fid: z.fid, bytes: stZip ? stZip.size : null, path: zipPath });
-        } catch (e) {}
 
         const pdfPaths = await unzipPdfToDir(zipPath, outDir, { maxFiles: ZIP_MAX_FILES });
-        logZip('zip-unzipped', { itemId, fid: z.fid, pdfCount: Array.isArray(pdfPaths) ? pdfPaths.length : 0, outDir });
+        logZip('zip-unzipped', { itemId, fid: z.fid, pdfCount: pdfPaths.length });
 
         if (!pdfPaths.length) return { uploaded: 0 };
 
-        const pdfChunks = chunk(pdfPaths, ZIP_CHUNK);
+        const chunkSize = (Number(ZIP_CHUNK) > 0 ? Number(ZIP_CHUNK) : 1);
+        const pdfChunks = chunk(pdfPaths, chunkSize);
+        logZip('zip-chunks', { itemId, fid: z.fid, pdfCount: (pdfPaths||[]).length, chunkSize, chunks: (pdfChunks||[]).length });
+        logZip('zip-chunks', { itemId, fid: z.fid, chunks: pdfChunks.length, chunkSize: ZIP_CHUNK });
 
-          logZip('zip-chunks', { itemId, fid: z.fid, zipChunk: ZIP_CHUNK, chunks: Array.isArray(pdfChunks) ? pdfChunks.length : null });
-          if (!ZIP_CHUNK || Number(ZIP_CHUNK) < 1) throw new Error('ZIP_CHUNK must be >= 1');
         let localUploaded = 0;
 
-          const beforeIds = new Set();
+        for (let idx = 0; idx < pdfChunks.length; idx++) {
+          const part = pdfChunks[idx];
 
-          // ids, которые были в поле ДО распаковки (чтобы потом не удалить старые не-PDF)
-          for (const f of currentFiles) {
-            const fid0 = normalizeFileToken(f);
-            if (fid0) beforeIds.add(String(Number(fid0)));
-          }
+          // Всегда перечитываем — так меньше шансов затереть чужие параллельные апдейты
+          currentItem = await refetchItem(entityTypeId, itemId);
+          currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
 
-        for (const part of pdfChunks) {
-          // ids того что уже лежит в поле (включая ZIP пока)
-          const keepIds = [];
-          for (const f of currentFiles) {
-            const fid = normalizeFileToken(f);
-            if (fid) keepIds.push(Number(fid));
-          }
+          const keepIds = (currentFiles || [])
+            .map(normalizeFileToken)
+            .filter(Boolean)
+            .map((x) => Number(x))
+            .filter((n) => Number.isFinite(n) && n > 0);
 
           const fileDatas = [];
           for (const pdfPath of part) {
@@ -591,40 +614,68 @@ for (const z of zipObjs) {
             if (!st) continue;
             if (st.size > ZIP_MAX_PDF_MB * 1024 * 1024) continue;
 
-            let buf;
-            try {
-              buf = await fsp.readFile(pdfPath);
-            } catch (e) {
-              logZip('zip-pdf-read-fail', { itemId, fid: z.fid, pdfPath, err: String(e?.message || e).slice(0, 200) });
-              continue;
-            }
+            const buf = await fsp.readFile(pdfPath);
             const b64 = buf.toString('base64');
             const fileName = path.basename(pdfPath);
             fileDatas.push([fileName, b64]);
-
           }
 
           if (!fileDatas.length) continue;
 
-          // добавляем PDF (ZIP остаётся, чтобы поле не было пустым)
-            const beforeCount = (currentFiles || []).length;
-          const beforeIds = new Set(keepIds.map((x) => String(x)));
-          logZip('zip-upload-part', { itemId, keep: currentFiles.length, add: fileDatas.length });
-          await bitrix.call('crm.item.update', {
-            entityTypeId: Number(entityTypeId),
-            id: Number(itemId),
-            fields: { [F_FILES_PAY_WRITE]: buildUfMultiFilePayload(currentFiles, fileDatas) },
-          });
+          const beforeCount = (currentFiles || []).length;
 
-          // перечитываем
+          // crm.item.update перезаписывает поле -> шлём [старые, новые]
+          // fallback: пробуем 2 формата сохранения старых файлов
+          const tryModes = ['num', 'obj'];
 
+          let applied = false;
+          let lastAfterCount = beforeCount;
 
-          currentItem = await refetchItem(entityTypeId, itemId);
+          for (const mode of tryModes) {
+            const payload = buildUfMultiFilePayload(keepIds, fileDatas, mode);
 
+            logZip('zip-upload-part', {
+              itemId,
+              fid: z.fid,
+              name: z.name,
+              chunk: idx + 1,
+              chunks: pdfChunks.length,
+              keep: keepIds.length,
+              add: fileDatas.length,
+              mode,
+            });
 
-          currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
+            await bitrix.call('crm.item.update', {
+              entityTypeId: Number(entityTypeId),
+              id: Number(itemId),
+              fields: { [F_FILES_PAY_WRITE]: payload },
+            });
 
+            currentItem = await refetchItem(entityTypeId, itemId);
+            currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
+            lastAfterCount = (currentFiles || []).length;
 
+            logZip('zip-upload-after', {
+              itemId,
+              fid: z.fid,
+              chunk: idx + 1,
+              beforeCount,
+              afterCount: lastAfterCount,
+              addedWanted: fileDatas.length,
+              mode,
+            });
+
+            if (lastAfterCount > beforeCount) {
+              applied = true;
+              break;
+            }
+
+            logZip('zip-upload-no-effect', { itemId, fid: z.fid, chunk: idx + 1, beforeCount, afterCount: lastAfterCount, mode });
+          }
+
+          if (!applied) {
+            throw new Error(`crm.item.update: no effect (before=${beforeCount} after=${lastAfterCount})`);
+          }
 
           localUploaded += fileDatas.length;
         }
@@ -634,59 +685,52 @@ for (const z of zipObjs) {
 
       uploadedTotal += uploaded;
     } catch (e) {
-      const msg = e?.response?.data?.error_description || e?.message || String(e);
-        logZip('zip-error', { itemId, fid: z?.fid, name: z?.name, msg: String(msg).slice(0, 300), stack: String(e?.stack || '').slice(0, 900) });
-      await addSpaTimelineComment(itemId, `ZIP распаковка: ошибка при добавлении PDF из "${z.name}": ${String(msg).slice(0, 180)}. ZIP оставлен.`);
-      // при ошибке — не продолжаем удаление ZIP
+      const msg = e?.response?.data?.error_description || e?.data?.error_description || e?.message || String(e);
+      await addSpaTimelineComment(itemId, `ZIP распаковка: ошибка при добавлении PDF из "${z.name}": ${String(msg).slice(0, 220)}. ZIP оставлен.`);
+      logZip('zip-error', { itemId, fid: z.fid, name: z.name, err: String(msg).slice(0, 400) });
       return { changed: false, files: input, error: msg };
     }
   }
 
+  logZip('zip-uploaded-total', { itemId, uploadedTotal, zipFound: zipObjs.length });
+
   // если ничего не загрузили — ZIP оставляем как есть
-      logZip('zip-uploaded-total', { itemId, uploadedTotal, zipFound: zipObjs.length });
-if (uploadedTotal <= 0) {
-    await addSpaTimelineComment(itemId, `ZIP найден(ы) (${zipObjs.length}), но PDF не добавились (возможны лимиты/права). ZIP оставлен.`);
+  if (uploadedTotal <= 0) {
+    await addSpaTimelineComment(itemId, `ZIP найден(ы): ${zipObjs.length}, но PDF не добавились (возможны лимиты/права). ZIP оставлен.`);
     return { changed: false, files: input, note: 'no_pdf_uploaded' };
   }
 
-  // теперь удаляем ZIP из поля (оставляя всё остальное)
-  try {
-    const finalIds = [];
-    for (const f of currentFiles) {
-      const fid = normalizeFileToken(f);
-      if (!fid) continue;
-      if (zipIds.has(String(fid))) continue; // выкидываем ZIP
-        // выкидываем мусор: оставляем только PDF (и то, что было до распаковки)
-        try {
-          const nm = f.name || f.originalName || '';
-          if (nm && !isPdfName(nm) && !beforeIds.has(String(fid))) continue;
-        } catch (e) {}
+  // 4) после загрузки PDF — удаляем ZIP из поля, оставляя PDF + старые не-PDF
+  currentItem = await refetchItem(entityTypeId, itemId);
+  currentFiles = extractFilesList(currentItem?.[F_FILES_PAY_READ]);
 
-      finalIds.push(Number(fid));
-    }
+  const finalKeepIds = [];
+  for (const f of currentFiles) {
+    const fid = normalizeFileToken(f);
+    if (!fid) continue;
+    const sid = String(Number(fid));
+    if (zipIds.has(sid)) continue;
 
-    if (finalIds.length > 0) {
-      await bitrix.call('crm.item.update', {
-        entityTypeId: Number(entityTypeId),
-        id: Number(itemId),
-        fields: { [F_FILES_PAY_WRITE]: finalIds.map((id) => ({ id })) },
-      });
-    }
+    let name = '';
+    try { name = await resolveFileName(f); } catch (_) {}
 
-    const finalItem = await refetchItem(entityTypeId, itemId);
-    const finalFiles = extractFilesList(finalItem?.[F_FILES_PAY_READ]);
-
-    await addSpaTimelineComment(itemId, `ZIP распакован: добавлено PDF (${uploadedTotal}), ZIP удалён (${zipObjs.length}).`);
-
-    return { changed: true, files: finalFiles, removedZip: zipObjs.length, addedPdf: uploadedTotal };
-  } catch (e2) {
-    const msg = e2?.response?.data?.error_description || e2?.message || String(e2);
-    await addSpaTimelineComment(itemId, `PDF добавлены (${uploadedTotal}), но удалить ZIP не удалось: ${String(msg).slice(0, 180)}.`);
-    const finalItem = await refetchItem(entityTypeId, itemId);
-    const finalFiles = extractFilesList(finalItem?.[F_FILES_PAY_READ]);
-    return { changed: true, files: finalFiles, removedZip: 0, addedPdf: uploadedTotal, warn: msg };
+    // оставляем PDF + всё что было до распаковки
+    if (isPdfName(name) || beforeIds.has(sid)) finalKeepIds.push(Number(fid));
   }
+
+  if (finalKeepIds.length) {
+    logZip('zip-remove', { itemId, before: currentFiles.length, after: finalKeepIds.length, removedZip: zipIds.size });
+    await bitrix.call('crm.item.update', {
+      entityTypeId: Number(entityTypeId),
+      id: Number(itemId),
+      fields: { [F_FILES_PAY_WRITE]: finalKeepIds },
+    });
+  }
+
+  await addSpaTimelineComment(itemId, `ZIP распакован: добавлено PDF: ${uploadedTotal}. ZIP удалён из поля.`);
+  return { changed: true, files: finalKeepIds };
 }
+
 
 async function syncFilesChecklistAndMaybeClose({ itemId, taskId, item, stageId }) {
   // 1) сначала ZIP -> PDF (если нужно)
