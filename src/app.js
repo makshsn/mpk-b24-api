@@ -6,6 +6,9 @@ const publicRoutes = require('./routes/public.routes');
 
 const app = express();
 
+
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true }));
 // если у тебя есть nginx — можно оставить, не мешает
 app.set('trust proxy', 1);
 

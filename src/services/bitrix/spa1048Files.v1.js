@@ -18,13 +18,22 @@ function log(level, event, payload) {
 }
 
 function extLower(name) { return path.extname(String(name || '')).toLowerCase(); }
-function isZip(name) { return extLower(name) === '.zip'; }
-function isPdf(name) { return extLower(name) === '.pdf'; }
+function isZipName(name) { return extLower(name) === '.zip'; }
+function isPdfName(name) { return extLower(name) === '.pdf'; }
 
-function uniqByName(arr) {
+function detectExtByMagic(buf) {
+  if (!buf || buf.length < 4) return '';
+  // ZIP: PK..
+  if (buf[0] === 0x50 && buf[1] === 0x4b) return '.zip';
+  // PDF: %PDF
+  if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return '.pdf';
+  return '';
+}
+
+function uniqByName(files) {
   const seen = new Set();
   const out = [];
-  for (const f of arr) {
+  for (const f of files) {
     const k = String(f.name || '').toLowerCase();
     if (!k) continue;
     if (seen.has(k)) continue;
@@ -36,7 +45,7 @@ function uniqByName(arr) {
 
 /** ---- дедуп комментариев (чтобы не спамить) ---- */
 const COMMENT_TTL_SEC = Number(process.env.SPA1048_FILES_COMMENT_TTL_SEC || 600);
-const commentSeen = new Map(); // key -> ts
+const commentSeen = new Map();
 function shouldPostComment(key) {
   const now = Date.now();
   const last = commentSeen.get(key) || 0;
@@ -64,61 +73,35 @@ async function addTimelineComment({ entityTypeId, entityId, text, dedupKey }) {
 }
 
 /**
- * В UF(File multiple) могут лежать:
- * - число (fileId)
- * - объект {id, url, urlMachine, name, size}
+ * UF(File multiple) обычно приходит как массив объектов: [{id:123}, ...]
+ * Имён может не быть.
  */
 function parseFileField(raw) {
   const out = [];
   const push = (v) => {
     if (!v) return;
     if (Array.isArray(v)) return v.forEach(push);
-
     if (typeof v === 'object') {
       const id = toNum(v.id || v.ID || v.fileId || v.FILE_ID);
       out.push({
         id,
         name: v.name || v.NAME || v.originalName || v.ORIGINAL_NAME || null,
-        size: toNum(v.size || v.SIZE),
-        url: v.url || v.URL || null,
         urlMachine: v.urlMachine || v.URL_MACHINE || null,
+        url: v.url || v.URL || null,
       });
       return;
     }
-
-    out.push({ id: toNum(v), name: null, size: 0, url: null, urlMachine: null });
+    out.push({ id: toNum(v), name: null, urlMachine: null, url: null });
   };
-
   push(raw);
   return out.filter(x => x.id > 0);
 }
 
-/** берём base вебхука (как в bitrixClient) */
 function pickWebhookBase() {
-  // сначала из config/env (если есть), потом env vars
-  let env = {};
-  try { env = require('../../config/env'); } catch (_) {}
-
-  const base =
-    env.BITRIX_WEBHOOK_BASE ||
-    env.BITRIX_WEBHOOK_URL ||
-    env.B24_WEBHOOK_URL ||
-    process.env.BITRIX_WEBHOOK_BASE ||
-    process.env.BITRIX_WEBHOOK_URL ||
-    process.env.B24_WEBHOOK_URL ||
-    process.env.B24_WEBHOOK ||
-    process.env.BITRIX_WEBHOOK ||
-    '';
-
-  const s = String(base || '').trim();
+  const s = String(process.env.BITRIX_WEBHOOK_BASE || '').trim();
   return s.endsWith('/') ? s.slice(0, -1) : s;
 }
 
-/**
- * Строим REST URL для скачивания CRM file:
- * .../crm.controller.item.getFile.json?entityTypeId=...&id=...&fieldName=...&fileId=...
- * ВАЖНО: fieldName используем в UPPER (как в UI).
- */
 function buildCrmGetFileUrl({ entityTypeId, itemId, fieldNameUpper, fileId }) {
   const base = pickWebhookBase();
   if (!base) return null;
@@ -143,18 +126,29 @@ async function getItemFiles({ entityTypeId, itemId, fieldUpper, fieldCamel }) {
   }, { ctx: { step: 'crm_item_get_files', itemId } });
 
   const item = r?.item || r?.result?.item || r?.result || r;
-
   const raw = (item && item[fieldCamel] !== undefined) ? item[fieldCamel] : item?.[fieldUpper];
-  const files = parseFileField(raw);
-
-  return { raw, files };
+  return { raw, files: parseFileField(raw) };
 }
 
-/**
- * Скачиваем файл:
- * - если urlMachine/url пришёл из поля — используем его
- * - если нет — строим crm.controller.item.getFile.json по fileId
- */
+function parseFilenameFromContentDisposition(cd) {
+  if (!cd) return null;
+  const s = String(cd);
+
+  // RFC5987: filename*=UTF-8''...
+  const mStar = s.match(/filename\*\s*=\s*([^;]+)/i);
+  if (mStar) {
+    let v = mStar[1].trim();
+    v = v.replace(/^UTF-8''/i, '').replace(/^["']|["']$/g, '');
+    try { return decodeURIComponent(v); } catch (_e) { return v; }
+  }
+
+  // filename="..."
+  const m = s.match(/filename\s*=\s*("?)([^";]+)\1/i);
+  if (m) return m[2];
+
+  return null;
+}
+
 async function downloadToBuffer({ fileRef, entityTypeId, itemId, fieldNameUpper }) {
   const url =
     fileRef.urlMachine ||
@@ -178,12 +172,20 @@ async function downloadToBuffer({ fileRef, entityTypeId, itemId, fieldNameUpper 
   if (resp.status < 200 || resp.status >= 300) {
     throw new Error(`download_http_${resp.status}_id_${fileRef.id}`);
   }
-  return Buffer.from(resp.data);
+
+  const ct = String(resp.headers?.['content-type'] || '').toLowerCase();
+  if (ct.includes('application/json')) {
+    const txt = Buffer.from(resp.data).toString('utf8').slice(0, 500);
+    throw new Error(`download_json_instead_of_file_id_${fileRef.id}: ${txt}`);
+  }
+
+  const buf = Buffer.from(resp.data);
+  const cd = resp.headers?.['content-disposition'];
+  const filename = parseFilenameFromContentDisposition(cd);
+
+  return { buffer: buf, filename };
 }
 
-/**
- * ZIP -> PDF buffers (лимиты: maxFiles, maxPdfMb)
- */
 async function extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb }) {
   const out = [];
   const maxBytes = Number(maxPdfMb) * 1024 * 1024;
@@ -194,7 +196,7 @@ async function extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb }) {
     if (entry.type !== 'File') continue;
 
     const name = entry.path.split('/').pop();
-    if (!isPdf(name)) continue;
+    if (!isPdfName(name)) continue;
     if (entry.uncompressedSize > maxBytes) continue;
 
     const buf = await entry.buffer();
@@ -204,8 +206,48 @@ async function extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb }) {
 }
 
 /**
- * Нормализация UF(File multiple) через fileData=[name, base64]
+ * Обновление поля файлами (перезапись).
+ * Правильный формат: [[name, base64], ...]
+ * Если payload слишком большой — chunk режим с накоплением id.
  */
+async function updateUfFilesReplace({ entityTypeId, itemId, fieldCamel, fieldUpper, uploadList }) {
+  if (!uploadList.length) throw new Error('upload_list_empty');
+
+  const makePairs = (lst) => lst.map(f => [f.name, f.buffer.toString('base64')]);
+
+  const chunk = Number(process.env.SPA1048_FILES_CHUNK || 0); // 0 = одним запросом
+  if (!chunk || uploadList.length <= chunk) {
+    await bitrix.call('crm.item.update', {
+      entityTypeId: Number(entityTypeId),
+      id: Number(itemId),
+      fields: { [fieldCamel]: makePairs(uploadList) },
+    }, { ctx: { step: 'crm_item_update_files_replace', itemId } });
+    return;
+  }
+
+  let existingIds = [];
+  for (let i = 0; i < uploadList.length; i += chunk) {
+    const part = uploadList.slice(i, i + chunk);
+    const fieldsValue = [
+      ...existingIds.map(id => ({ id })),
+      ...makePairs(part),
+    ];
+
+    await bitrix.call('crm.item.update', {
+      entityTypeId: Number(entityTypeId),
+      id: Number(itemId),
+      fields: { [fieldCamel]: fieldsValue },
+    }, { ctx: { step: 'crm_item_update_files_chunk', itemId, partFrom: i, partCount: part.length } });
+
+    const after = await getItemFiles({ entityTypeId, itemId, fieldUpper, fieldCamel });
+    existingIds = after.files.map(f => f.id);
+
+    if (!existingIds.length) {
+      throw new Error(`chunk_update_result_empty_after_part_${i}`);
+    }
+  }
+}
+
 async function normalizeSpaFiles({ entityTypeId, itemId }) {
   const fieldUpper = cfg.filesField || 'UF_CRM_8_1768219060503';
   const fieldCamel = cfg.filesFieldCamel || 'ufCrm8_1768219060503';
@@ -232,30 +274,30 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       await addTimelineComment({
         entityTypeId,
         entityId: itemId,
-        text: `Поле файлов пустое (${fieldUpper}/${fieldCamel}). Нельзя продолжать: поле обязательное.`,
+        text: `Поле файлов пустое (${fieldUpper}/${fieldCamel}). Поле обязательное — обработка остановлена.`,
         dedupKey: `files_empty_${itemId}`,
       });
       return { ok: false, action: 'required_field_empty', beforeIds: [], afterIds: [] };
     }
 
-    // скачиваем все файлы
     const downloaded = [];
     const downloadErrors = [];
 
     for (const f of before.files) {
       try {
-        const buf = await downloadToBuffer({
-          fileRef: f,
-          entityTypeId,
-          itemId,
-          fieldNameUpper: fieldUpper,
-        });
+        const { buffer, filename } = await downloadToBuffer({ fileRef: f, entityTypeId, itemId, fieldNameUpper: fieldUpper });
 
-        // имя может не прийти — делаем техническое, но с правильным расширением
-        let name = f.name;
-        if (!name) name = `file_${f.id}`;
+        // 1) имя из поля
+        // 2) имя из content-disposition
+        // 3) fallback file_<id> + ext по сигнатуре
+        let name = f.name || filename || `file_${f.id}`;
+        const ext = extLower(name);
+        if (!ext) {
+          const guessed = detectExtByMagic(buffer);
+          if (guessed) name = `${name}${guessed}`;
+        }
 
-        downloaded.push({ id: f.id, name, buffer: buf });
+        downloaded.push({ id: f.id, name, buffer });
       } catch (e) {
         downloadErrors.push({ id: f.id, error: e.message });
       }
@@ -275,54 +317,58 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       await addTimelineComment({
         entityTypeId,
         entityId: itemId,
-        text: `Не удалось скачать ни одного файла из поля ${fieldUpper}/${fieldCamel}. Автонормализация невозможна.`,
+        text: `Не удалось скачать ни одного файла из поля ${fieldUpper}/${fieldCamel}.`,
         dedupKey: `files_download_none_${itemId}`,
       });
       return { ok: false, action: 'download_none', beforeIds, afterIds: [] };
     }
 
-    // ZIP?
-    const zips = downloaded.filter(x => isZip(x.name));
-    const nonZips = downloaded.filter(x => !isZip(x.name));
+    // ZIP детект: по имени ИЛИ по магии
+    const zips = downloaded.filter(x => isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip');
+    const nonZips = downloaded.filter(x => !(isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip'));
 
-    let extractedPdfs = [];
+    let uploadList = [];
+    let extractedPdfCount = 0;
+    let action = 'reuploaded';
+
     if (zips.length) {
       const zip = zips[0];
       const zipPath = path.join(tmpRoot, `in_${zip.id}.zip`);
       await fsp.writeFile(zipPath, zip.buffer);
 
-      extractedPdfs = await extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb });
+      const pdfs = await extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb });
+      extractedPdfCount = pdfs.length;
 
       log('debug', 'ZIP_EXTRACT', {
         itemId,
         zipId: zip.id,
         zipName: zip.name,
-        pdfCount: extractedPdfs.length,
+        pdfCount: extractedPdfCount,
         maxFiles,
         maxPdfMb,
       });
 
-      if (!extractedPdfs.length) {
+      if (!pdfs.length) {
         await addTimelineComment({
           entityTypeId,
           entityId: itemId,
-          text: `ZIP (${zip.name}) найден, но подходящих PDF нет (или не прошли лимиты).`,
+          text: `ZIP найден, но подходящих PDF нет (или не прошли лимиты).`,
           dedupKey: `zip_no_pdf_${itemId}`,
         });
+        uploadList = downloaded.map(x => ({ name: x.name, buffer: x.buffer }));
+        action = 'reuploaded_zip_no_pdf';
+      } else {
+        // как ты просил: перезаписываем НОВЫМИ PDF (старые не сохраняем),
+        // но nonZip оставляем (если хочешь убирать nonZip — скажи, выкину)
+        uploadList = [
+          ...nonZips.map(x => ({ name: x.name, buffer: x.buffer })),
+          ...pdfs.map(x => ({ name: x.name, buffer: x.buffer })),
+        ];
+        action = 'zip_replaced_with_pdfs';
       }
-    }
-
-    // итоговый список upload:
-    // если ZIP был и PDF извлечены -> ZIP не возвращаем
-    // иначе -> reupload как есть
-    let uploadList = [];
-    if (zips.length && extractedPdfs.length) {
-      uploadList = [
-        ...nonZips.map(x => ({ name: x.name, buffer: x.buffer })),
-        ...extractedPdfs.map(x => ({ name: x.name, buffer: x.buffer })),
-      ];
     } else {
       uploadList = downloaded.map(x => ({ name: x.name, buffer: x.buffer }));
+      action = 'reuploaded';
     }
 
     uploadList = uniqByName(uploadList);
@@ -337,41 +383,44 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       return { ok: false, action: 'would_be_empty', beforeIds, afterIds: [] };
     }
 
-    const ufValue = uploadList.map(f => ({
-      fileData: [f.name, f.buffer.toString('base64')],
-    }));
-
     log('debug', 'FILES_UPDATE_PREPARED', {
       itemId,
-      fieldCamel,
-      uploadCount: ufValue.length,
+      action,
+      uploadCount: uploadList.length,
       zipDetected: zips.length > 0,
-      extractedPdfCount: extractedPdfs.length,
+      extractedPdfCount,
     });
 
-    // ВАЖНО: update делаем по camelCase
-    await bitrix.call('crm.item.update', {
-      entityTypeId: Number(entityTypeId),
-      id: Number(itemId),
-      fields: { [fieldCamel]: ufValue },
-    }, { ctx: { step: 'crm_item_update_files', itemId } });
+    await updateUfFilesReplace({ entityTypeId, itemId, fieldCamel, fieldUpper, uploadList });
 
     const after = await getItemFiles({ entityTypeId, itemId, fieldUpper, fieldCamel });
     const afterIds = after.files.map(f => f.id);
 
     const res = {
       ok: true,
-      action: (zips.length && extractedPdfs.length) ? 'zip_replaced_with_pdfs' : 'reuploaded',
+      action,
       beforeIds,
       afterIds,
       beforeCount: beforeIds.length,
       afterCount: afterIds.length,
       zipDetected: zips.length > 0,
-      extractedPdfCount: extractedPdfs.length,
+      extractedPdfCount,
+      pdfNames: uploadList.filter(x => String(x.name||'').toLowerCase().endsWith('.pdf')).map(x => x.name),
       downloadErrors,
     };
 
     log('debug', 'FILES_AFTER', res);
+
+    if (!afterIds.length) {
+      await addTimelineComment({
+        entityTypeId,
+        entityId: itemId,
+        text: `⚠️ Bitrix вернул 200 OK, но поле файлов стало пустым после обновления. Нужна проверка формата/лимитов.`,
+        dedupKey: `files_after_empty_${itemId}`,
+      });
+      return { ok: false, action: 'update_applied_but_empty', ...res };
+    }
+
     return res;
   } finally {
     try { await fsp.rm(tmpRoot, { recursive: true, force: true }); } catch (_e) {}

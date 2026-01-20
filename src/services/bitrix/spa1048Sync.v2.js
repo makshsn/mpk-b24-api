@@ -1,26 +1,21 @@
-const bitrix = require("./bitrixClient");
-const cfg = require("../../config/spa1048");
-  }
-const { ensureChecklistForTask } = require("./taskChecklistSync.v1");
-  }const { normalizeSpaFiles } = require("./spa1048Files.v1");
-  }
+const bitrix = require('./bitrixClient');
+const cfg = require('../../config/spa1048');
+const { ensureChecklistForTask } = require('./taskChecklistSync.v1');
+const { normalizeSpaFiles } = require('./spa1048Files.v1');
+const { createPaymentTaskIfMissing } = require('./spa1048PaymentTask.v1');
+
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
-  }
+
 async function withItemLock(itemId, fn) {
   const key = String(itemId);
-  }  if (itemLocks.has(key)) {
-    return await itemLocks.get(key);
-  }  }
+  if (itemLocks.has(key)) return await itemLocks.get(key);
   const p = (async () => {
-    try {
-      return await fn();
-  }    } finally {
-      itemLocks.delete(key);
-  }    }
+    try { return await fn(); }
+    finally { itemLocks.delete(key); }
   })();
-  }  itemLocks.set(key, p);
-  }  return await p;
+  itemLocks.set(key, p);
+  return await p;
 }
 
 function unwrap(resp) {
@@ -30,510 +25,120 @@ function unwrap(resp) {
 function dateOnly(x) {
   if (!x) return null;
   return String(x).slice(0, 10);
-  }}
+}
 
 function normalizeStageId(x) {
-  if (!x) return "";
-  return String(x)
-    .trim()
-    .replace(/^['"]+|['"]+$/g, "");
-  }}
+  if (!x) return '';
+  return String(x).trim().replace(/^['"]+|['"]+$/g, '');
+}
 
-function nowIso() {
-  return new Date().toISOString();
-  }}
-
-function msBetween(aIso, bIso) {
-  const a = new Date(aIso).getTime();
-  }  const b = new Date(bIso).getTime();
-  }  if (!Number.isFinite(a) || !Number.isFinite(b)) return Infinity;
-  return Math.abs(a - b);
-  }}
-
-// В crm.item.get поля приходят в camelCase
-const F_DEADLINE = "ufCrm8_1768219591855"; // "Крайний срок оплаты счёта"
-const F_TASK_ID = "ufCrm8TaskId"; // UF_CRM_8_TASK_ID
-const F_SYNC_AT = "ufCrm8SyncAt"; // UF_CRM_8_SYNC_AT
-const F_SYNC_SRC = "ufCrm8SyncSrc"; // UF_CRM_8_SYNC_SRC
-const F_FILES = cfg.filesFieldCamel || "ufCrm8_1768219060503";
-
-const TASK_STATUS_COMPLETED = 5; // завершена
-
-async function getItem(itemId) {
-  const r = await bitrix.call("crm.item.get", {
-    entityTypeId: cfg.entityTypeId,
+async function getItem(entityTypeId, itemId) {
+  const r = await bitrix.call('crm.item.get', {
+    entityTypeId: Number(entityTypeId),
     id: Number(itemId),
-    select: ["*"],
-  });
-  }  const u = unwrap(r);
-  }  const item = u?.item || u?.result?.item || u?.result || u;
-  if (!item)
-    throw new Error(
-      `[spa1048] crm.item.get: item not found, raw=${JSON.stringify(r).slice(0, 2000)}`
-    );
-  }  return item;
-}
-
-async function updateItem(itemId, fields) {
-  const r = await bitrix.call("crm.item.update", {
-    entityTypeId: cfg.entityTypeId,
-    id: Number(itemId),
-    fields,
-  });
-  }  return unwrap(r);
-  }}
-
-function isFinal(stageId) {
-  return (cfg.stageFinal || []).includes(stageId);
-  }}
-function isActive(stageId) {
-  return (cfg.stageActive || []).includes(stageId);
-  }}
-
-// Привязка задачи к SPA: Bitrix хранит связи в UF_CRM_TASK.
-// Для SPA entityTypeId=1048, hex=418, префикс T418_
-function bindingCandidates(item) {
-  const hex = Number(cfg.entityTypeId).toString(16).toUpperCase(); // 1048 -> 418
-  const prefix = `T${hex}_`; // T418_
-  const id = Number(item.id);
-  }  const cid = Number(item.categoryId);
-  }
-  // Встречаются схемы:
-  // - T418_<itemId>
-  // - T418_<categoryId>_<itemId>
-  return [[`${prefix}${id}`], [`${prefix}${cid}_${id}`]];
-}
-
-function taskDeadlineIsoFromDate(dateYmd) {
-  // фиксируем время 12:00 МСК
-  return `${dateYmd}T12:00:00+03:00`;
-}
-
-function safeText(x, max = 80) {
-  if (!x) return "";
-  const s = String(x).replace(/\s+/g, " ").trim();
-  }  return s.length > max ? s.slice(0, max - 1) + "…" : s;
-}
-
-function taskTitle(item) {
-  // item.title приходит из crm.item.get
-  const name = safeText(item.title || item.TITLE || "");
-  }  if (name) return `Оплатить счёт "${name}" (#${item.id})`;
-  return `Оплатить счёт #${item.id}`;
-}
-
-function taskDescription(itemId) {
-  return `Открыть счёт: https://b24-mg3u3i.bitrix24.ru/crm/type/${cfg.entityTypeId}/details/${itemId}/
-
-Отмечайте пункты чек-листа — в течение ~5 минут задача закроется автоматически.
-Если нужно быстрее, нажмите «Завершить задачу» вручную — счёт будет помечен как оплаченный и перейдёт в раздел «Оплаченные».`;
-}
-
-async function addSpaTimelineComment(itemId, text) {
-  const et = Number(cfg.entityTypeId);
-  }  const id = Number(itemId);
-  }
-  const tries = [
-    // вариант 1
-    {
-      method: "crm.timeline.comment.add",
-      params: { fields: { ENTITY_TYPE_ID: et, ENTITY_ID: id, COMMENT: text } },
-    },
-    // вариант 2
-    {
-      method: "crm.timeline.comment.add",
-      params: { fields: { ENTITY_TYPE: `DYNAMIC_${et}`, ENTITY_ID: id, COMMENT: text } },
-    },
-  ];
-
-  let lastErr = null;
-  for (const t of tries) {
-    try {
-      await bitrix.call(t.method, t.params);
-  }      return { ok: true };
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-
-  const msg = lastErr?.response?.data?.error_description || lastErr?.message || String(lastErr);
-  }  return { ok: false, error: msg };
-}
-
-async function createTaskBoundToItem(item, deadlineYmd) {
-  const baseFields = {
-    TITLE: taskTitle(item),
-    DESCRIPTION: taskDescription(item.id),
-    RESPONSIBLE_ID: Number(cfg.accountantId || 1),
-    DEADLINE: taskDeadlineIsoFromDate(deadlineYmd),
-  };
-
-  const tries = bindingCandidates(item);
-  }
-  // 1) пробуем с привязкой UF_CRM_TASK
-  for (const uf of tries) {
-    try {
-      const r = await bitrix.call("tasks.task.add", {
-        fields: {
-          ...baseFields,
-          UF_CRM_TASK: uf,
-        },
-      });
-  }      const u = unwrap(r);
-  }      const taskId = Number(u?.task?.id || u?.result?.task?.id || u?.id || u?.result);
-  }      if (!taskId)
-        throw new Error(
-          `[spa1048] tasks.task.add ok, but taskId not found: ${JSON.stringify(r).slice(0, 2000)}`
-        );
-  }      return { taskId, bind: uf };
-    } catch (_e) {
-      // пробуем следующий формат
-    }
-  }
-
-  // 2) если привязка не зашла — создаём без неё (хотя бы задача будет)
-  const r = await bitrix.call("tasks.task.add", { fields: baseFields });
-  }  const u = unwrap(r);
-  }  const taskId = Number(u?.task?.id || u?.result?.task?.id || u?.id || u?.result);
-  }  if (!taskId)
-    throw new Error(
-      `[spa1048] tasks.task.add (no bind) ok, but taskId not found: ${JSON.stringify(r).slice(
-        0,
-        2000
-      )}`
-    );
-  }  return { taskId, bind: null };
-}
-
-async function getTask(taskId) {
-  const r = await bitrix.call("tasks.task.get", {
-    taskId: Number(taskId),
-    select: ["ID", "TITLE", "DEADLINE", "STATUS", "CLOSED_DATE", "UF_CRM_TASK"],
-  });
-  }  const u = unwrap(r);
-  }  const task = u?.task || u?.result?.task || u?.result || u;
-  if (!task)
-    throw new Error(
-      `[spa1048] tasks.task.get: task not found, raw=${JSON.stringify(r).slice(0, 2000)}`
-    );
-  }  return task;
-}
-
-async function updateTaskDeadline(taskId, deadlineYmd) {
-  return unwrap(
-    await bitrix.call("tasks.task.update", {
-      taskId: Number(taskId),
-      fields: { DEADLINE: taskDeadlineIsoFromDate(deadlineYmd) },
-    })
-  );
-  }}
-
-async function listTasksByBinding(binding) {
-  const r = await bitrix.call("tasks.task.list", {
-    filter: { UF_CRM_TASK: binding },
-    select: ["ID", "STATUS", "DEADLINE", "CREATED_DATE", "TITLE"],
-    order: { ID: "DESC" },
-  });
-  }
+    select: ['*'],
+  }, { ctx: { step: 'crm_item_get', itemId } });
   const u = unwrap(r);
-  }  const tasks = u?.tasks || u?.result?.tasks || u || [];
-  return Array.isArray(tasks) ? tasks : [];
+  return u?.item || u;
 }
 
-function isCompletedTask(task) {
-  // Bitrix: 5 = completed
-  return String(task?.status ?? task?.STATUS) === "5";
-}
+/**
+ * Основная синхронизация: задача -> чеклист -> файлы
+ */
+async function syncSpa1048Item({ itemId, debug = false }) {
+  const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
+  const filesEnabled = process.env.SPA1048_FILES_ENABLED !== '0';
 
-async function findExistingBoundTask(item) {
-  for (const arr of bindingCandidates(item)) {
-    const binding = arr?.[0];
-    if (!binding) continue;
+  const item = await getItem(entityTypeId, itemId);
+  if (!item?.id) return { ok: false, error: 'item_not_found', itemId };
 
-    try {
-      const tasks = await listTasksByBinding(binding);
-  }      if (!tasks.length) continue;
+  const stageId = normalizeStageId(item.stageId || item.STAGE_ID);
 
-      const alive = tasks.find((t) => !isCompletedTask(t));
-  }      const pick = alive || tasks[0];
+  // дедлайн у тебя может быть в другом UF — оставляем как было/пусто
+  const deadline = dateOnly(item.ufCrm8_1768219591855 || item.UF_CRM_8_1768219591855 || null);
 
-      const id = Number(pick?.id || pick?.ID);
-  }      if (id) return { taskId: id, binding, task: pick };
-    } catch (_e) {}
+  // ВАЖНО: taskId хранится в UF_CRM_8_TASK_ID (в ответе приходит ufCrm8TaskId)
+  const taskId = Number(item.ufCrm8TaskId || item.UF_CRM_8_TASK_ID || item.uf_crm_8_task_id || 0) || 0;
+
+  // чеклист
+  let checklist = { ok: false, error: 'no_task' };
+  if (taskId) {
+    checklist = await ensureChecklistForTask({ taskId });
   }
-  return null;
-}
 
-async function handleSpaEvent(req) {
-  const _itemId =
-    Number(req.query?.itemId) ||
-    Number(req.body?.data?.FIELDS?.ID) ||
-    Number(req.body?.data?.FIELDS?.Id) ||
-    Number(req.body?.data?.id) ||
-    0;
-
-  if (!_itemId) return { ok: true, action: "skip_no_item_id" };
-
-  return await withItemLock(_itemId, async () => {
-    const itemId = _itemId;
-
-    // результат файловой нормализации (пишем в return для отладки)
-    //let files = null;
-
-    const item0 = await getItem(itemId);
+  // файлы (ZIP->PDF, reupload)
+  let files = { ok: true, action: 'skipped' };
+  if (filesEnabled) {
+    files = await normalizeSpaFiles({ entityTypeId, itemId });
   }
-    // анти-петля: если мы сами только что писали — выходим
-    if (item0[F_SYNC_AT]) {
-      const delta = msBetween(item0[F_SYNC_AT], nowIso());
-  }      if (delta < 4000) {
-        return {
-          ok: true,
-          itemId,
-          action: "skip_anti_loop",
-          syncAt: item0[F_SYNC_AT],
-          syncSrc: item0[F_SYNC_SRC] || "",
-        };
-      }
-    }
 
-    // deadline: если пуст — ставим +7 дней
-    let ensuredDeadline = false;
-    let item = item0;
-
-    if (!item[F_DEADLINE]) {
-      const today = new Date();
-  }      const day = Number(process.env.SPA1048_DEFAULT_MONTH_DAY || 25);
-  }
-      let y = today.getFullYear();
-  }      let m = today.getMonth(); // 0..11
-
-      // если уже позже "дня месяца" — ставим на следующий месяц, чтобы не получить дату в прошлом
-      if (today.getDate() > day) {
-        m += 1;
-        if (m > 11) {
-          m = 0;
-          y += 1;
-        }
-      }
-
-      // ensured accountant on SPA item (responsible)
-      let ensuredAccountant = false;
-      const accId = Number(cfg.accountantId || process.env.SPA1048_ACCOUNTANT_ID || 1);
-  }      const curAssigned = Number(item.assignedById || item.ASSIGNED_BY_ID || 0);
-  }      if (accId && curAssigned !== accId) {
-        await updateItem(itemId, {
-          assignedById: accId,
-          [F_SYNC_AT]: nowIso(),
-          [F_SYNC_SRC]: "server_set_accountant",
-        });
-  }        ensuredAccountant = true;
-        item = await getItem(itemId);
-  }      }
-
-      const target = new Date(y, m, day);
-  }      const yyyy = target.getFullYear();
-  }      const mm = String(target.getMonth() + 1).padStart(2, "0");
-  }      const dd = String(target.getDate()).padStart(2, "0");
-  }      const ymd = `${yyyy}-${mm}-${dd}`;
-      await updateItem(itemId, {
-        [F_DEADLINE]: ymd,
-        [F_SYNC_AT]: nowIso(),
-        [F_SYNC_SRC]: "server_deadline_default",
-      });
-  }
-      ensuredDeadline = true;
-      item = await getItem(itemId);
-  }    }
-
-    const stageId = normalizeStageId(item.stageId);
-  }    const deadlineYmd = dateOnly(item[F_DEADLINE]);
-  }
-    if (isFinal(stageId)) {
-      return {
-        ok: true,
-        itemId,
-        stageId,
-        deadline: deadlineYmd,
-        ensuredDeadline,
-        action: "final_skip",
-      };
-    }
-
-    if (!isActive(stageId)) {
-      return {
-        ok: true,
-        itemId,
-        stageId,
-        deadline: deadlineYmd,
-        ensuredDeadline,
-        action: "not_active_skip",
-      };
-    }
-
-    let taskId = item[F_TASK_ID] ? Number(item[F_TASK_ID]) : null;
-    let files = null;
-
-    if (taskId) {
-      let task;
-      try {
-        task = await getTask(taskId);
-  }      } catch (_e) {
-        // задача могла быть удалена → пересоздаём
-        const created = await createTaskBoundToItem(item, deadlineYmd);
-  }        await updateItem(itemId, {
-          [F_TASK_ID]: created.taskId,
-          [F_SYNC_AT]: nowIso(),
-          [F_SYNC_SRC]: "server_task_recreate",
-        });
-  }
-        const checklist = await ensureChecklistForTask(created.taskId);
-  }        try {
-          files = if (process.env.SPA1048_FILES_ENABLED !== '0') {
-    await normalizeSpaFiles({
-            entityTypeId: cfg.entityTypeId,
-            itemId,
-            fieldName: F_FILES,
-          });
-  }        } catch (e) {
-          files = { ok: false, error: e?.message || String(e) };
-        }
-
-        return {
-          ok: true,
-          itemId,
-          stageId,
-          deadline: deadlineYmd,
-          ensuredDeadline,
-          action: "task_recreated",
-          oldTaskId: taskId,
-          taskId: created.taskId,
-          bind: created.bind,
-          checklist,
-          files,
-        };
-      }
-
-      const status = Number(task.status || task.STATUS || 0);
-  }
-      // ✅ НОВОЕ: если задача завершена — дедлайн НЕ трогаем, пишем коммент в счёт
-      if (status === TASK_STATUS_COMPLETED || task.closedDate || task.CLOSED_DATE) {
-        const text =
-          `Задача #${taskId} завершена. ` +
-          `Дедлайн по счёту изменён на ${deadlineYmd}, но дедлайн завершённой задачи обновлять нельзя.`;
-
-        const c = await addSpaTimelineComment(itemId, text);
-  }
-        return {
-          ok: true,
-          itemId,
-          stageId,
-          deadline: deadlineYmd,
-          ensuredDeadline,
-          action: "task_closed_skip",
-          taskId,
-          comment: c.ok ? "added" : `failed: ${c.error}`,
-        };
-      }
-
-      // чек-лист: гарантируем наличие пунктов
-      const checklist = await ensureChecklistForTask(taskId);
-  }
-      const taskDeadlineYmd = dateOnly(task.deadline);
-  }
-      if (deadlineYmd && taskDeadlineYmd !== deadlineYmd) {
-        await updateTaskDeadline(taskId, deadlineYmd);
-  }        await updateItem(itemId, {
-          [F_SYNC_AT]: nowIso(),
-          [F_SYNC_SRC]: "server_task_deadline_sync",
-        });
-  }
-        // Файлы: запускаем ПОСЛЕ задачи и чеклиста
-        try {
-          files = if (process.env.SPA1048_FILES_ENABLED !== '0') {
-    await normalizeSpaFiles({
-            entityTypeId: cfg.entityTypeId,
-            itemId,
-            fieldName: F_FILES,
-          });
-  }        } catch (e) {
-          files = { ok: false, error: e?.message || String(e) };
-        }
-
-        return {
-          ok: true,
-          itemId,
-          stageId,
-          deadline: deadlineYmd,
-          ensuredDeadline,
-          action: "task_deadline_updated",
-          taskId,
-          from: taskDeadlineYmd,
-          to: deadlineYmd,
-          checklist,
-          files,
-        };
-      }
-
-      // Файлы: запускаем ПОСЛЕ задачи и чеклиста
-      try {
-        files = if (process.env.SPA1048_FILES_ENABLED !== '0') {
-    await normalizeSpaFiles({
-          entityTypeId: cfg.entityTypeId,
-          itemId,
-          fieldName: F_FILES,
-        });
-  }      } catch (e) {
-        files = { ok: false, error: e?.message || String(e) };
-      }
-
-      return {
-        ok: true,
-        itemId,
-        stageId,
-        deadline: deadlineYmd,
-        ensuredDeadline,
-        action: "no_change",
-        taskId,
-        checklist,
-        files,
-      };
-    }
-
-    // taskId пуст — создаём
-    const created = await createTaskBoundToItem(item, deadlineYmd);
-  }
-    await updateItem(itemId, {
-      [F_TASK_ID]: created.taskId,
-      [F_SYNC_AT]: nowIso(),
-      [F_SYNC_SRC]: "server_task_create",
+  // --- payment task + checklist by PDF names ---
+  const accountantId = Number(process.env.SPA1048_ACCOUNTANT_ID || cfg.accountantId || 70);
+  let taskCreate = null;
+  if (!taskId) {
+    const pdfNames = files?.pdfNames || [];
+    taskCreate = await createPaymentTaskIfMissing({
+      entityTypeId,
+      itemId,
+      itemTitle: item.title || item.TITLE || '',
+      deadline,
+      taskId: 0,
+      pdfNames,
+      responsibleId: Number(item.assignedById || item.ASSIGNED_BY_ID || accountantId),
     });
   }
-    // чек-лист + файлы
-    const checklist = await ensureChecklistForTask(created.taskId);
-  }    try {
-      files = if (process.env.SPA1048_FILES_ENABLED !== '0') {
-    await normalizeSpaFiles({
-        entityTypeId: cfg.entityTypeId,
-        itemId,
-        fieldName: F_FILES,
-      });
-  }    } catch (e) {
-      files = { ok: false, error: e?.message || String(e) };
+
+  return {
+    ok: true,
+    itemId: Number(itemId),
+    stageId,
+    deadline,
+    ensuredDeadline: false,
+    action: 'no_change',
+    taskId: taskId || taskCreate?.taskId || null,
+    taskCreate,
+    checklist,
+    files,
+    debug: debug ? { filesEnabled, entityTypeId } : undefined,
+  };
+}
+
+/**
+ * Express handler: /b24/spa-event?itemId=50&debug=1
+ */
+async function handleSpaEvent(req, res) {
+  try {
+
+
+    const p = req?.params || {};
+    const b = req.body || {};
+    const q = req.query || {};
+    const raw = (
+      req.query?.itemId ??
+      req.query?.id ??
+      req.body?.data?.FIELDS?.ID ??
+      req.body?.data?.FIELDS?.id ??
+      req.body?.FIELDS?.ID ??
+      req.body?.FIELDS?.id ??
+      req.body?.itemId ??
+      req.body?.id
+    );
+    const itemId = Number(raw);
+
+    if (!Number.isFinite(itemId) || itemId <= 0) {
+      return res.status(400).json({ ok: false, error: `invalid_itemId:${raw}` });
     }
 
-    return {
-      ok: true,
-      itemId,
-      stageId,
-      deadline: deadlineYmd,
-      ensuredDeadline,
-      action: "task_created",
-      taskId: created.taskId,
-      bind: created.bind,
-      checklist,
-      files,
-    };
-  });
-  }}
+    const debug = String(q.debug ?? b.debug ?? '0') === '1';
 
-module.exports = { handleSpaEvent };
+    const result = await withItemLock(itemId, async () => {
+      return await syncSpa1048Item({ itemId, debug });
+    });
+
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+}
+
+module.exports = { handleSpaEvent, syncSpa1048Item, withItemLock };
