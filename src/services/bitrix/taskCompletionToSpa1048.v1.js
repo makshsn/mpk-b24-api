@@ -1,3 +1,5 @@
+'use strict';
+
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
 const { ensureObjectBody, verifyOutboundToken, extractTaskId } = require('./b24Outbound.v1');
@@ -60,25 +62,35 @@ function normalizeBindings(value) {
   return [value];
 }
 
-function findSpaItemId(ufCrmTask, entityTypeId) {
+/**
+ * Из ufCrmTask / UF_CRM_TASK вытаскиваем кандидатов itemId из формата:
+ *  - "T418_58"
+ *  - "T1048_58"
+ *  - "t418-58" (на всякий)
+ *  - "T418:58"
+ * Берём только itemId (вторая часть), префикс игнорируем.
+ */
+function parseCandidateItemIds(ufCrmTask) {
   const bindings = normalizeBindings(ufCrmTask);
-  const re = /D(?:_|:|-)?(\d+)[_:|-](\d+)/gi;
+
+  // базовый формат Bitrix: T<любые цифры>_<id>
+  const re = /T(\d+)[_:|-](\d+)/gi;
+  const ids = [];
 
   for (const raw of bindings) {
     const text = String(raw || '').trim();
     if (!text) continue;
 
     let match;
+    re.lastIndex = 0;
     while ((match = re.exec(text)) !== null) {
-      const typeId = parseNumber(match[1]);
       const itemId = parseNumber(match[2]);
-      if (typeId === entityTypeId && itemId) {
-        return { itemId, raw: text };
-      }
+      if (itemId && itemId > 0) ids.push(itemId);
     }
   }
 
-  return null;
+  // unique
+  return Array.from(new Set(ids));
 }
 
 function unwrapTaskGet(resp) {
@@ -88,7 +100,7 @@ function unwrapTaskGet(resp) {
 async function fetchTask(taskId) {
   const result = await bitrix.call('tasks.task.get', {
     taskId: Number(taskId),
-    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE'],
+    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE', 'UF_*', '*'],
   });
   return unwrapTaskGet(result);
 }
@@ -99,6 +111,28 @@ async function updateSpaStage({ itemId, stageId, entityTypeId }) {
     id: Number(itemId),
     fields: { stageId },
   });
+}
+
+/**
+ * Проверяем кандидатов через crm.item.get(entityTypeId=1048)
+ * чтобы не обновить случайно не тот объект.
+ */
+async function resolveSpaItemIdFromTask(ufCrmTask, entityTypeId) {
+  const candidates = parseCandidateItemIds(ufCrmTask);
+  for (const id of candidates) {
+    try {
+      const r = await bitrix.call('crm.item.get', {
+        entityTypeId: Number(entityTypeId),
+        id: Number(id),
+        select: ['id'],
+      });
+      const item = r?.result?.item || r?.item || null;
+      if (item?.id || item?.ID) return Number(id);
+    } catch (e) {
+      // кандидат не подошёл — пробуем следующий
+    }
+  }
+  return null;
 }
 
 async function handleTaskCompletionEvent(req, res) {
@@ -112,7 +146,7 @@ async function handleTaskCompletionEvent(req, res) {
   const taskId = extractTaskId(req);
   const statusAfter = extractStatusAfter(req);
   const statusBefore = extractStatusBefore(req);
-  const debug = req.method === 'GET';
+  const debug = req.method === 'GET' || String(req?.query?.debug || '') === '1';
 
   console.log('[task-event] incoming', {
     taskId,
@@ -126,11 +160,25 @@ async function handleTaskCompletionEvent(req, res) {
   }
 
   if (statusBefore === COMPLETED_STATUS) {
-    return res.json({ ok: true, action: 'skip_already_completed', taskId, statusBefore, statusAfter, debug });
+    return res.json({
+      ok: true,
+      action: 'skip_already_completed',
+      taskId,
+      statusBefore,
+      statusAfter,
+      debug,
+    });
   }
 
   if (statusAfter !== COMPLETED_STATUS) {
-    return res.json({ ok: true, action: 'skip_status', taskId, statusBefore, statusAfter, debug });
+    return res.json({
+      ok: true,
+      action: 'skip_status_not_completed',
+      taskId,
+      statusBefore,
+      statusAfter,
+      debug,
+    });
   }
 
   const task = await fetchTask(taskId);
@@ -141,28 +189,37 @@ async function handleTaskCompletionEvent(req, res) {
   const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
   const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
 
-  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
-  const binding = findSpaItemId(ufCrmTask, entityTypeId);
+  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK || task?.uf_crm_task;
+  const candidates = parseCandidateItemIds(ufCrmTask);
+  const resolvedItemId = await resolveSpaItemIdFromTask(ufCrmTask, entityTypeId);
 
   console.log('[task-event] bindings', {
     taskId,
     ufCrmTask,
-    foundItemId: binding?.itemId || null,
+    candidates,
+    resolvedItemId,
   });
 
-  if (!binding?.itemId) {
-    return res.json({ ok: true, action: 'skip_no_spa_binding', taskId, statusAfter, debug });
+  if (!resolvedItemId) {
+    return res.json({
+      ok: true,
+      action: 'skip_no_spa_binding',
+      taskId,
+      statusAfter,
+      debug,
+      ...(debug ? { ufCrmTask, candidates, resolvedItemId: null } : {}),
+    });
   }
 
   const updateResult = await updateSpaStage({
-    itemId: binding.itemId,
+    itemId: resolvedItemId,
     stageId,
     entityTypeId,
   });
 
   console.log('[task-event] spa_stage_updated', {
     taskId,
-    itemId: binding.itemId,
+    itemId: resolvedItemId,
     stageId,
     updateResult,
   });
@@ -171,10 +228,11 @@ async function handleTaskCompletionEvent(req, res) {
     ok: true,
     action: 'spa_stage_updated',
     taskId,
-    itemId: binding.itemId,
+    itemId: resolvedItemId,
     statusAfter,
     stageId,
     debug,
+    ...(debug ? { ufCrmTask, candidates, resolvedItemId } : {}),
   });
 }
 
