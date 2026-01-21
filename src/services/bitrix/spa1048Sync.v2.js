@@ -10,6 +10,8 @@ const { createPaymentTaskIfMissing } = require('./spa1048PaymentTask.v1');
 const checklistModulePath = path.join(__dirname, 'taskChecklistSync.v1.js');
 const checklistModule = fs.existsSync(checklistModulePath) ? require('./taskChecklistSync.v1') : null;
 const ensureChecklistForTask = checklistModule?.ensureChecklistForTask;
+const getChecklistItems = checklistModule?.getChecklistItems;
+const isChecklistFullyComplete = checklistModule?.isChecklistFullyComplete;
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
@@ -136,6 +138,103 @@ async function ensureActiveTaskId(taskId) {
   }
 }
 
+async function safeMoveSpaToSuccess({ entityTypeId, itemId, taskId }) {
+  try {
+    await bitrix.call('crm.item.update', {
+      entityTypeId: Number(entityTypeId),
+      id: Number(itemId),
+      fields: { stageId: 'DT1048_14:SUCCESS' },
+    }, { ctx: { step: 'crm_move_success_from_task', itemId, taskId } });
+    return { ok: true, action: 'moved_to_success' };
+  } catch (e) {
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(),
+      level: 'error',
+      event: 'SPA1048_MOVE_SUCCESS_FAIL',
+      itemId,
+      taskId,
+      error: e?.message || String(e),
+    }));
+    return { ok: false, action: 'move_success_failed', error: e?.message || String(e) };
+  }
+}
+
+async function autoCloseTaskByChecklist({
+  entityTypeId,
+  itemId,
+  taskId,
+  stageId,
+  checklistItems,
+  taskStatus,
+}) {
+  const stageBefore = normalizeStageId(stageId);
+  const stageSuccess = 'DT1048_14:SUCCESS';
+
+  if (!taskId) {
+    return { ok: true, action: 'skip_no_task', taskId: null, stageBefore, stageAfter: stageBefore };
+  }
+
+  if (Number(taskStatus) === 5) {
+    if (stageBefore === stageSuccess) {
+      return { ok: true, action: 'skip_task_completed_and_success', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
+    }
+    const moveResult = await safeMoveSpaToSuccess({ entityTypeId, itemId, taskId });
+    return {
+      ok: moveResult.ok,
+      action: moveResult.ok ? 'task_completed_move_success' : 'task_completed_move_success_failed',
+      taskId: Number(taskId),
+      stageBefore,
+      stageAfter: moveResult.ok ? stageSuccess : stageBefore,
+      error: moveResult.ok ? undefined : moveResult.error,
+    };
+  }
+
+  if (!Array.isArray(checklistItems) || checklistItems.length === 0) {
+    return { ok: true, action: 'skip_checklist_empty', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
+  }
+
+  if (!isChecklistFullyComplete || !isChecklistFullyComplete(checklistItems)) {
+    return { ok: true, action: 'skip_checklist_not_complete', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
+  }
+
+  if (stageBefore === stageSuccess) {
+    return { ok: true, action: 'skip_already_success', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
+  }
+
+  try {
+    await bitrix.call('tasks.task.complete', {
+      taskId: Number(taskId),
+    }, { ctx: { step: 'task_auto_complete', taskId, itemId } });
+  } catch (e) {
+    console.error(JSON.stringify({
+      ts: new Date().toISOString(),
+      level: 'error',
+      event: 'SPA1048_TASK_COMPLETE_FAIL',
+      itemId,
+      taskId,
+      error: e?.message || String(e),
+    }));
+    return {
+      ok: false,
+      action: 'task_complete_failed',
+      taskId: Number(taskId),
+      stageBefore,
+      stageAfter: stageBefore,
+      error: e?.message || String(e),
+    };
+  }
+
+  const moveResult = await safeMoveSpaToSuccess({ entityTypeId, itemId, taskId });
+  return {
+    ok: moveResult.ok,
+    action: moveResult.ok ? 'task_completed_move_success' : 'move_success_failed',
+    taskId: Number(taskId),
+    stageBefore,
+    stageAfter: moveResult.ok ? stageSuccess : stageBefore,
+    error: moveResult.ok ? undefined : moveResult.error,
+  };
+}
+
 async function syncSpa1048Item({ itemId, debug = false }) {
   const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
   const filesEnabled = process.env.SPA1048_FILES_ENABLED !== '0';
@@ -204,10 +303,15 @@ async function syncSpa1048Item({ itemId, debug = false }) {
 
   // чеклист (опционален)
   let checklist = { ok: false, action: 'skipped', reason: 'no_task' };
+  let checklistItems = [];
   if (activeTaskId && ensureChecklistForTask) {
     try {
       const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
       checklist = await ensureChecklistForTask(activeTaskId, pdfList);
+      checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
+      if (!checklistItems.length && getChecklistItems) {
+        checklistItems = await getChecklistItems(activeTaskId);
+      }
     } catch (e) {
       checklist = { ok: false, action: 'error', error: e?.message || String(e) };
     }
@@ -226,20 +330,35 @@ async function syncSpa1048Item({ itemId, debug = false }) {
       itemId,
       itemTitle: item.title || item.TITLE || '',
       deadline: taskDeadlineIso(deadline),
-      taskId: 0,
+      taskId,
       pdfNames,
       responsibleId: Number(item.assignedById || item.ASSIGNED_BY_ID || accountantId),
+      stageId,
     });
 
     if (taskCreate?.taskId && ensureChecklistForTask) {
       try {
         const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
         checklist = await ensureChecklistForTask(taskCreate.taskId, pdfList);
+        checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
+        if (!checklistItems.length && getChecklistItems) {
+          checklistItems = await getChecklistItems(taskCreate.taskId);
+        }
       } catch (e) {
         checklist = { ok: false, action: 'error', error: e?.message || String(e) };
       }
     }
   }
+
+  const autoCloseTargetTaskId = activeTaskId || taskId || taskCreate?.taskId || null;
+  const taskAutoClose = await autoCloseTaskByChecklist({
+    entityTypeId,
+    itemId,
+    taskId: autoCloseTargetTaskId,
+    stageId,
+    checklistItems,
+    taskStatus: taskCheck?.status,
+  });
 
   return {
     ok: true,
@@ -253,6 +372,7 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     taskDeadlineSync,
     checklist,
     files,
+    taskAutoClose: debug ? taskAutoClose : undefined,
     debug: debug ? { filesEnabled, entityTypeId, deadlineOrig, deadlineCamel } : undefined,
   };
 }

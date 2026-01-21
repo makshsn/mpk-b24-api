@@ -46,6 +46,14 @@ async function addTask({ title, description, responsibleId, deadline, crmBinding
   return taskId;
 }
 
+async function getTask(taskId) {
+  const r = await bitrix.call('tasks.task.get', {
+    taskId: Number(taskId),
+    select: ['ID', 'STATUS'],
+  }, { ctx: { step: 'task_get_for_create', taskId } });
+  const t = r?.task || r?.result?.task || r?.result;
+  return t || null;
+}
 
 async function bindTaskToCrm(taskId, crmBindings) {
   if (!Array.isArray(crmBindings) || !crmBindings.length) return;
@@ -135,9 +143,52 @@ async function findSpaByTaskId({ entityTypeId, taskId }) {
   return null;
 }
 
-async function createPaymentTaskIfMissing({ entityTypeId, itemId, itemTitle, deadline, taskId, pdfNames, responsibleId }) {
-  if (taskId) {
-    return { ok: true, action: 'skip_task_exists', taskId: Number(taskId) };
+async function createPaymentTaskIfMissing({
+  entityTypeId,
+  itemId,
+  itemTitle,
+  deadline,
+  taskId,
+  pdfNames,
+  responsibleId,
+  stageId,
+}) {
+  const existingTaskId = toNum(taskId);
+  const stage = String(stageId || '');
+
+  if (existingTaskId) {
+    try {
+      const task = await getTask(existingTaskId);
+      const status = Number(task?.status || task?.STATUS || 0) || 0;
+      if (status === 5) {
+        let movedToSuccess = false;
+        if (stage !== 'DT1048_14:SUCCESS') {
+          try {
+            await moveSpaToSuccess({ entityTypeId, itemId });
+            movedToSuccess = true;
+          } catch (e) {
+            return {
+              ok: false,
+              action: 'task_completed_skip_create',
+              taskId: existingTaskId,
+              status,
+              error: e?.message || String(e),
+            };
+          }
+        }
+        return {
+          ok: true,
+          action: 'task_completed_skip_create',
+          taskId: existingTaskId,
+          status,
+          movedToSuccess,
+        };
+      }
+
+      return { ok: true, action: 'skip_task_exists', taskId: existingTaskId, status };
+    } catch (e) {
+      // если задача удалена/не найдена — создаём новую
+    }
   }
 
   const pdfs = uniq(pdfNames).filter(x => x.toLowerCase().endsWith('.pdf'));
