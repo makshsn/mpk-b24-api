@@ -1,5 +1,7 @@
 'use strict';
 
+const qs = require('querystring');
+
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
 const { ensureObjectBody, verifyOutboundToken, extractTaskId } = require('./b24Outbound.v1');
@@ -20,40 +22,86 @@ function pickFirstNumber(values) {
   return null;
 }
 
-function extractStatusAfter(req) {
+function parseQueryFromUrl(req) {
+  const u = String(req.originalUrl || req.url || '');
+  const i = u.indexOf('?');
+  if (i < 0) return {};
+  return qs.parse(u.slice(i + 1));
+}
+
+function coerceBody(req) {
+  // ensureObjectBody уже пытается нормализовать, но на всякий:
   const b = ensureObjectBody(req);
-  return pickFirstNumber([
-    req?.query?.status,
-    req?.query?.STATUS,
-    req?.query?.statusAfter,
-    req?.query?.STATUS_AFTER,
-    b?.status,
-    b?.STATUS,
-    b?.statusAfter,
-    b?.STATUS_AFTER,
-    b?.data?.FIELDS_AFTER?.STATUS,
-    b?.data?.FIELDS_AFTER?.status,
-    b?.data?.FIELDS?.STATUS,
-    b?.data?.FIELDS?.status,
-    b?.FIELDS_AFTER?.STATUS,
-    b?.FIELDS_AFTER?.status,
-    b?.FIELDS?.STATUS,
-    b?.FIELDS?.status,
+  if (typeof b === 'string') {
+    const s = b.trim();
+    if (!s) return {};
+    // попробуем JSON
+    if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+      try { return JSON.parse(s); } catch (_) {}
+    }
+    // попробуем x-www-form-urlencoded
+    try { return qs.parse(s); } catch (_) {}
+    return {};
+  }
+  return b || {};
+}
+
+function pickFromAny(req, keys) {
+  const q = req.query || {};
+  const q2 = parseQueryFromUrl(req);
+  const b = coerceBody(req);
+
+  for (const k of keys) {
+    if (q[k] != null && q[k] !== '') return q[k];
+    if (q2[k] != null && q2[k] !== '') return q2[k];
+    if (b[k] != null && b[k] !== '') return b[k];
+  }
+
+  // deep-пути (Bitrix часто шлёт именно так)
+  const deep = [
+    () => b?.data?.FIELDS_AFTER?.ID,
+    () => b?.data?.FIELDS_AFTER?.id,
+    () => b?.data?.FIELDS?.ID,
+    () => b?.data?.FIELDS?.id,
+    () => b?.FIELDS_AFTER?.ID,
+    () => b?.FIELDS_AFTER?.id,
+    () => b?.FIELDS?.ID,
+    () => b?.FIELDS?.id,
+  ];
+  for (const fn of deep) {
+    try {
+      const v = fn();
+      if (v != null && v !== '') return v;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+function extractStatusAfter(req) {
+  // кроме STATUS бывает REAL_STATUS
+  const v = pickFromAny(req, [
+    'status', 'STATUS', 'statusAfter', 'STATUS_AFTER',
+    'REAL_STATUS', 'real_status', 'realStatus',
+    'data[FIELDS_AFTER][STATUS]',
+    'data[FIELDS_AFTER][REAL_STATUS]',
+    'data[FIELDS][STATUS]',
+    'data[FIELDS][REAL_STATUS]',
+    'FIELDS_AFTER[STATUS]',
+    'FIELDS_AFTER[REAL_STATUS]',
   ]);
+  return pickFirstNumber([v]);
 }
 
 function extractStatusBefore(req) {
-  const b = ensureObjectBody(req);
-  return pickFirstNumber([
-    req?.query?.statusBefore,
-    req?.query?.STATUS_BEFORE,
-    b?.statusBefore,
-    b?.STATUS_BEFORE,
-    b?.data?.FIELDS_BEFORE?.STATUS,
-    b?.data?.FIELDS_BEFORE?.status,
-    b?.FIELDS_BEFORE?.STATUS,
-    b?.FIELDS_BEFORE?.status,
+  const v = pickFromAny(req, [
+    'statusBefore', 'STATUS_BEFORE',
+    'data[FIELDS_BEFORE][STATUS]',
+    'data[FIELDS_BEFORE][REAL_STATUS]',
+    'FIELDS_BEFORE[STATUS]',
+    'FIELDS_BEFORE[REAL_STATUS]',
   ]);
+  return pickFirstNumber([v]);
 }
 
 function normalizeBindings(value) {
@@ -62,35 +110,29 @@ function normalizeBindings(value) {
   return [value];
 }
 
-/**
- * Из ufCrmTask / UF_CRM_TASK вытаскиваем кандидатов itemId из формата:
- *  - "T418_58"
- *  - "T1048_58"
- *  - "t418-58" (на всякий)
- *  - "T418:58"
- * Берём только itemId (вторая часть), префикс игнорируем.
- */
-function parseCandidateItemIds(ufCrmTask) {
+function extractCandidatesFromBindings(ufCrmTask) {
+  // ufCrmTask у тебя вида ['T418_58'] — нам важен сам itemId (58)
   const bindings = normalizeBindings(ufCrmTask);
-
-  // базовый формат Bitrix: T<любые цифры>_<id>
-  const re = /T(\d+)[_:|-](\d+)/gi;
-  const ids = [];
+  const out = new Set();
 
   for (const raw of bindings) {
-    const text = String(raw || '').trim();
-    if (!text) continue;
+    const s = String(raw || '').trim();
+    if (!s) continue;
 
-    let match;
-    re.lastIndex = 0;
-    while ((match = re.exec(text)) !== null) {
-      const itemId = parseNumber(match[2]);
-      if (itemId && itemId > 0) ids.push(itemId);
+    // самый надёжный для твоего кейса: *_<digits> в конце
+    let m = s.match(/[_:|-](\d+)\s*$/);
+    if (m) out.add(Number(m[1]));
+
+    // на всякий: D1048_58 / T1048_58 / D-1048-58 etc
+    const re = /[DT](\d+)[_:|-](\d+)/gi;
+    let mm;
+    while ((mm = re.exec(s)) !== null) {
+      const itemId = parseNumber(mm[2]);
+      if (itemId) out.add(itemId);
     }
   }
 
-  // unique
-  return Array.from(new Set(ids));
+  return Array.from(out).filter((n) => Number.isFinite(n) && n > 0);
 }
 
 function unwrapTaskGet(resp) {
@@ -100,7 +142,7 @@ function unwrapTaskGet(resp) {
 async function fetchTask(taskId) {
   const result = await bitrix.call('tasks.task.get', {
     taskId: Number(taskId),
-    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE', 'UF_*', '*'],
+    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE', 'UF_*'],
   });
   return unwrapTaskGet(result);
 }
@@ -113,72 +155,92 @@ async function updateSpaStage({ itemId, stageId, entityTypeId }) {
   });
 }
 
-/**
- * Проверяем кандидатов через crm.item.get(entityTypeId=1048)
- * чтобы не обновить случайно не тот объект.
- */
-async function resolveSpaItemIdFromTask(ufCrmTask, entityTypeId) {
-  const candidates = parseCandidateItemIds(ufCrmTask);
-  for (const id of candidates) {
-    try {
-      const r = await bitrix.call('crm.item.get', {
-        entityTypeId: Number(entityTypeId),
-        id: Number(id),
-        select: ['id'],
-      });
-      const item = r?.result?.item || r?.item || null;
-      if (item?.id || item?.ID) return Number(id);
-    } catch (e) {
-      // кандидат не подошёл — пробуем следующий
-    }
+async function existsSpaItem(entityTypeId, id) {
+  try {
+    const r = await bitrix.call('crm.item.get', { entityTypeId, id: Number(id), select: ['ID'] });
+    const item = r?.result?.item || r?.item || r?.result;
+    return !!(item && (item.id || item.ID));
+  } catch (_) {
+    return false;
   }
-  return null;
 }
 
 async function handleTaskCompletionEvent(req, res) {
-  ensureObjectBody(req);
+  coerceBody(req);
+  console.log('[task-event] RAW', {
+    method: req.method,
+    url: req.originalUrl || req.url,
+    headers: {
+      'content-type': req.headers['content-type'],
+      'user-agent': req.headers['user-agent'],
+      'x-forwarded-for': req.headers['x-forwarded-for'],
+    },
+    query: req.query,
+    bodyType: typeof req.body,
+    body: req.body,
+  });
+  
+
+  // debug включаем и по GET, и по ?debug=1
+  const debug = req.method === 'GET' || String(req?.query?.debug || '') === '1';
 
   if (req.method === 'POST') {
     const tok = verifyOutboundToken(req, 'B24_OUTBOUND_TASK_TOKEN');
     if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
   }
 
-  const taskId = extractTaskId(req);
+  // 1) taskId/status пытаемся вытащить максимально широко
+  let taskId = extractTaskId(req);
+  if (!taskId) {
+    taskId = pickFirstNumber([
+      pickFromAny(req, [
+        'taskId', 'TASK_ID', 'id', 'ID',
+        'data[FIELDS_AFTER][ID]',
+        'data[FIELDS][ID]',
+        'FIELDS_AFTER[ID]',
+        'FIELDS[ID]',
+      ]),
+    ]);
+  }
+
   const statusAfter = extractStatusAfter(req);
   const statusBefore = extractStatusBefore(req);
-  const debug = req.method === 'GET' || String(req?.query?.debug || '') === '1';
 
-  console.log('[task-event] incoming', {
-    taskId,
-    statusAfter,
-    statusBefore,
-    method: req.method,
-  });
+  if (debug) {
+    const q2 = parseQueryFromUrl(req);
+    console.log('[task-event] dbg', {
+      method: req.method,
+      url: req.originalUrl || req.url,
+      queryKeys: Object.keys(req.query || {}),
+      q2Keys: Object.keys(q2 || {}),
+      bodyType: typeof req.body,
+      bodyKeys: Object.keys((typeof req.body === 'object' && req.body) ? req.body : {}),
+      taskId,
+      statusAfter,
+      statusBefore,
+    });
+  }
+
+  console.log('[task-event] incoming', { taskId, statusAfter, statusBefore, method: req.method });
 
   if (!taskId) {
-    return res.json({ ok: true, action: 'skip_no_taskId', debug });
+    // тут уже нечего делать: Bitrix прислал пустой запрос
+    return res.json({
+      ok: true,
+      action: 'skip_no_taskId',
+      taskId,
+      statusAfter,
+      statusBefore,
+      debug,
+    });
   }
 
   if (statusBefore === COMPLETED_STATUS) {
-    return res.json({
-      ok: true,
-      action: 'skip_already_completed',
-      taskId,
-      statusBefore,
-      statusAfter,
-      debug,
-    });
+    return res.json({ ok: true, action: 'skip_already_completed', taskId, statusBefore, statusAfter, debug });
   }
 
   if (statusAfter !== COMPLETED_STATUS) {
-    return res.json({
-      ok: true,
-      action: 'skip_status_not_completed',
-      taskId,
-      statusBefore,
-      statusAfter,
-      debug,
-    });
+    return res.json({ ok: true, action: 'skip_status', taskId, statusBefore, statusAfter, debug });
   }
 
   const task = await fetchTask(taskId);
@@ -189,16 +251,22 @@ async function handleTaskCompletionEvent(req, res) {
   const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
   const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
 
-  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK || task?.uf_crm_task;
-  const candidates = parseCandidateItemIds(ufCrmTask);
-  const resolvedItemId = await resolveSpaItemIdFromTask(ufCrmTask, entityTypeId);
+  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
+  const candidates = extractCandidatesFromBindings(ufCrmTask);
 
-  console.log('[task-event] bindings', {
-    taskId,
-    ufCrmTask,
-    candidates,
-    resolvedItemId,
-  });
+  let resolvedItemId = null;
+  for (const cand of candidates) {
+    // чтобы не уехать в чужую сущность — проверяем что item реально существует в SPA1048
+    // (если это не SPA — crm.item.get вернёт ошибку/пусто)
+    // можно отключить, если хочешь скорость: но так безопаснее
+    // eslint-disable-next-line no-await-in-loop
+    const ok = await existsSpaItem(entityTypeId, cand);
+    if (ok) { resolvedItemId = cand; break; }
+  }
+
+  if (debug) {
+    console.log('[task-event] bindings', { taskId, ufCrmTask, candidates, resolvedItemId });
+  }
 
   if (!resolvedItemId) {
     return res.json({
@@ -207,7 +275,9 @@ async function handleTaskCompletionEvent(req, res) {
       taskId,
       statusAfter,
       debug,
-      ...(debug ? { ufCrmTask, candidates, resolvedItemId: null } : {}),
+      ufCrmTask,
+      candidates,
+      resolvedItemId,
     });
   }
 
@@ -217,12 +287,9 @@ async function handleTaskCompletionEvent(req, res) {
     entityTypeId,
   });
 
-  console.log('[task-event] spa_stage_updated', {
-    taskId,
-    itemId: resolvedItemId,
-    stageId,
-    updateResult,
-  });
+  if (debug) {
+    console.log('[task-event] spa_stage_updated', { taskId, itemId: resolvedItemId, stageId });
+  }
 
   return res.json({
     ok: true,
@@ -232,7 +299,10 @@ async function handleTaskCompletionEvent(req, res) {
     statusAfter,
     stageId,
     debug,
-    ...(debug ? { ufCrmTask, candidates, resolvedItemId } : {}),
+    ufCrmTask,
+    candidates,
+    resolvedItemId,
+    updateResult,
   });
 }
 
