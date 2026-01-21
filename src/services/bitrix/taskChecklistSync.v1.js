@@ -351,7 +351,6 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     }
 
     const desired = parseChecklistTitles();
-    const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
     const desiredMap = new Map(desired.map((t) => [`static:${normTitle(t)}`, t]));
     const kept = new Set();
     const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
@@ -402,8 +401,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       added.push(addedItem);
     }
 
-    const existingKeySet = new Set(existingKeys);
-    const toAddKeys = desiredKeys.filter((key) => !existingKeySet.has(key));
+
     const items = await getChecklist(taskId);
     const summary = buildChecklistSummary(items, rootId, true);
     return {
@@ -444,6 +442,6 @@ module.exports = {
   getChecklistItems: getChecklist,
   getChecklistSummary,
   buildPdfTitle,
-  getManagedKeyFromTitle,
+ 
   buildChecklistSummary,
 };
