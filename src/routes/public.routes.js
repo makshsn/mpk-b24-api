@@ -1,7 +1,7 @@
 const express = require('express');
 
 const { spaEvent } = require("../controllers/spa1048.controller");
-const { taskEvent } = require("../controllers/spa1048TaskEvent.controller");
+const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.controller");
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
 
 const router = express.Router();
@@ -28,8 +28,8 @@ router.use((req, res, next) => {
 router.post('/spa-event', spaEvent);
 router.get('/spa-event', spaEvent);
 
-router.post('/task-event', taskEvent);
-router.get('/task-event', taskEvent);
+router.post('/task-event', taskCompletionEvent);
+router.get('/task-event', taskCompletionEvent);
 
 router.post('/task-update', taskUpdateWebhook);
 router.get('/task-update', taskUpdateWebhook); // удобно для ручного теста
