@@ -20,6 +20,26 @@ function log(level, event, payload) {
 function extLower(name) { return path.extname(String(name || '')).toLowerCase(); }
 function isZipName(name) { return extLower(name) === '.zip'; }
 function isPdfName(name) { return extLower(name) === '.pdf'; }
+function nameKey(name) { return String(name || '').trim().toLowerCase(); }
+
+function listNameSet(list) {
+  const set = new Set();
+  for (const item of list || []) {
+    const key = nameKey(item?.name);
+    if (key) set.add(key);
+  }
+  return set;
+}
+
+function isSameNameSet(a, b) {
+  const setA = listNameSet(a);
+  const setB = listNameSet(b);
+  if (setA.size !== setB.size) return false;
+  for (const key of setA) {
+    if (!setB.has(key)) return false;
+  }
+  return true;
+}
 
 function detectExtByMagic(buf) {
   if (!buf || buf.length < 4) return '';
@@ -366,6 +386,34 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
     // ZIP детект: по имени ИЛИ по магии
     const zips = downloaded.filter(x => isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip');
     const nonZips = downloaded.filter(x => !(isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip'));
+    const pdfsInField = downloaded.filter(x => isPdfName(x.name) || detectExtByMagic(x.buffer) === '.pdf');
+
+    if (!zips.length && pdfsInField.length > 0) {
+      const pdfNames = pdfsInField
+        .map(x => x.name)
+        .filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
+      const pdfList = buildPdfList({ afterFiles: before.files, pdfNames });
+
+      log('debug', 'FILES_SKIP_NO_ZIP_PDF_ALREADY', {
+        itemId,
+        pdfCount: pdfNames.length,
+        beforeCount: beforeIds.length,
+      });
+
+      return {
+        ok: true,
+        action: 'skipped_no_zip_pdf_already',
+        beforeIds,
+        afterIds: beforeIds,
+        beforeCount: beforeIds.length,
+        afterCount: beforeIds.length,
+        zipDetected: false,
+        extractedPdfCount: 0,
+        pdfNames,
+        pdfList,
+        downloadErrors,
+      };
+    }
 
     let uploadList = [];
     let extractedPdfCount = 0;
@@ -421,6 +469,33 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
         dedupKey: `files_would_be_empty_${itemId}`,
       });
       return { ok: false, action: 'would_be_empty', beforeIds, afterIds: [] };
+    }
+
+    if (isSameNameSet(uploadList, downloaded)) {
+      const pdfNames = uploadList
+        .filter(x => String(x.name || '').toLowerCase().endsWith('.pdf'))
+        .map(x => x.name);
+      const pdfList = buildPdfList({ afterFiles: before.files, pdfNames });
+
+      log('debug', 'FILES_SKIP_NO_CHANGES', {
+        itemId,
+        action,
+        uploadCount: uploadList.length,
+      });
+
+      return {
+        ok: true,
+        action: 'skipped_no_changes',
+        beforeIds,
+        afterIds: beforeIds,
+        beforeCount: beforeIds.length,
+        afterCount: beforeIds.length,
+        zipDetected: zips.length > 0,
+        extractedPdfCount,
+        pdfNames,
+        pdfList,
+        downloadErrors,
+      };
     }
 
     log('debug', 'FILES_UPDATE_PREPARED', {
