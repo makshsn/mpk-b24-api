@@ -223,6 +223,34 @@ function normalizePdfList(pdfList) {
   return out;
 }
 
+async function ensureRoot(taskId, existingItems) {
+  let root = existingItems.find((it) => {
+    const title = String(it?.TITLE || it?.title || '').trim();
+    const parentId = toNum(it?.PARENT_ID || it?.parentId);
+    return parentId === 0 && title.startsWith('BX_CHECKLIST_');
+  });
+
+  if (!root) {
+    const createdRoot = await addChecklistItem(taskId, 'BX_CHECKLIST_1', 1, 0);
+    root = { ID: createdRoot?.id, TITLE: 'BX_CHECKLIST_1', PARENT_ID: 0 };
+  }
+
+  return { rootId: root ? toNum(root?.ID || root?.id) : 0, root };
+}
+
+function buildChecklistSummary(items, rootId, managedOnly = true) {
+  if (!Array.isArray(items) || !rootId) {
+    return { total: 0, done: 0, isAllDone: false };
+  }
+  const children = items.filter((it) => toNum(it?.PARENT_ID || it?.parentId) === rootId);
+  const scoped = managedOnly
+    ? children.filter((it) => getManagedKeyFromTitle(it?.TITLE || it?.title))
+    : children;
+  const total = scoped.length;
+  const done = scoped.filter(isDone).length;
+  return { total, done, isAllDone: total > 0 && total === done };
+}
+
 async function ensureChecklistForTask(taskId, pdfList = []) {
   try {
     const existing = await getChecklist(taskId);
@@ -304,6 +332,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       }
 
       const items = await getChecklist(taskId);
+      const summary = buildChecklistSummary(items, rootId, true);
       return {
         ok: true,
         mode: 'pdf',
@@ -317,11 +346,13 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         added,
         updated,
         items,
+        summary,
       };
     }
 
     const desired = parseChecklistTitles();
-    const desiredMap = new Map(desired.map((t) => [normTitle(t), t]));
+    const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
+    const desiredMap = new Map(desired.map((t) => [`static:${normTitle(t)}`, t]));
     const kept = new Set();
     const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
     const existingKeys = scopedItems
@@ -362,7 +393,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
 
     let sortIndex = 1;
     for (const t of desired) {
-      const key = normTitle(t);
+      const key = `static:${normTitle(t)}`;
       if (!key || kept.has(key)) {
         sortIndex++;
         continue;
@@ -371,7 +402,10 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       added.push(addedItem);
     }
 
+    const existingKeySet = new Set(existingKeys);
+    const toAddKeys = desiredKeys.filter((key) => !existingKeySet.has(key));
     const items = await getChecklist(taskId);
+    const summary = buildChecklistSummary(items, rootId, true);
     return {
       ok: true,
       mode: 'static',
@@ -385,6 +419,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       added,
       updated,
       items,
+      summary,
     };
   } catch (e) {
     log('error', 'CHECKLIST_ENSURE_FAIL', { taskId, error: e?.message || String(e) });
@@ -394,9 +429,13 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
 
 async function getChecklistSummary(taskId) {
   const items = await getChecklist(taskId);
-  const total = items.length;
-  const done = items.filter(isDone).length;
-  return { total, done, isAllDone: total > 0 && total === done };
+  const root = items.find((it) => {
+    const title = String(it?.TITLE || it?.title || '').trim();
+    const parentId = toNum(it?.PARENT_ID || it?.parentId);
+    return parentId === 0 && title.startsWith('BX_CHECKLIST_');
+  });
+  const rootId = root ? toNum(root?.ID || root?.id) : 0;
+  return buildChecklistSummary(items, rootId, true);
 }
 
 module.exports = {
@@ -405,4 +444,6 @@ module.exports = {
   getChecklistItems: getChecklist,
   getChecklistSummary,
   buildPdfTitle,
+  getManagedKeyFromTitle,
+  buildChecklistSummary,
 };

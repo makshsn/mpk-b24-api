@@ -57,11 +57,12 @@ function normalizePdfList(pdfList) {
 }
 
 function buildPdfTitle({ fileId, name }) {
-  return `Оплатить: ${name} [file:${fileId}]`;
+  return `Оплатить: ${name} [pdf:${fileId}]`;
 }
 
 function extractFileIdFromTitle(title) {
-  const match = String(title || '').match(/\[file:(\d+)\]/i);
+  const text = String(title || '');
+  const match = text.match(/\[(?:pdf|file):(\d+)\]/i);
   return match ? toNum(match[1]) : 0;
 }
 
