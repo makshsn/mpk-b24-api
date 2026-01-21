@@ -3,7 +3,13 @@
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
 const { normalizeSpaFiles } = require('./spa1048Files.v1');
-const { createPaymentTaskIfMissing, ensurePdfChecklist } = require('./spa1048PaymentTask.v1');
+const { createPaymentTaskIfMissing } = require('./spa1048PaymentTask.v1');
+
+const checklistModulePath = path.join(__dirname, 'taskChecklistSync.v1.js');
+const checklistModule = fs.existsSync(checklistModulePath) ? require('./taskChecklistSync.v1') : null;
+const ensureChecklistForTask = checklistModule?.ensureChecklistForTask;
+const getChecklistItems = checklistModule?.getChecklistItems;
+const isChecklistFullyComplete = checklistModule?.isChecklistFullyComplete;
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
@@ -190,7 +196,7 @@ async function autoCloseTaskByChecklist({
     return { ok: true, action: 'skip_checklist_empty', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
-  if (!isChecklistFullyComplete(checklistItems)) {
+  if (!isChecklistFullyComplete || !isChecklistFullyComplete(checklistItems)) {
     return { ok: true, action: 'skip_checklist_not_complete', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
@@ -301,11 +307,14 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   // чеклист (опционален)
   let checklist = { ok: false, action: 'skipped', reason: 'no_task' };
   let checklistItems = [];
-  if (activeTaskId && ensurePdfChecklist) {
+  if (activeTaskId && ensureChecklistForTask) {
     try {
       const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
-      checklist = await ensurePdfChecklist({ taskId: activeTaskId, pdfList });
-      checklistItems = Array.isArray(checklist?.itemsWithMarker) ? checklist.itemsWithMarker : [];
+      checklist = await ensureChecklistForTask(activeTaskId, pdfList);
+      checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
+      if (!checklistItems.length && getChecklistItems) {
+        checklistItems = await getChecklistItems(activeTaskId);
+      }
     } catch (e) {
       checklist = { ok: false, action: 'error', error: e?.message || String(e) };
     }
@@ -333,32 +342,15 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     if (taskCreate?.taskId && ensurePdfChecklist) {
       try {
         const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
-        checklist = await ensurePdfChecklist({ taskId: taskCreate.taskId, pdfList });
-        checklistItems = Array.isArray(checklist?.itemsWithMarker) ? checklist.itemsWithMarker : [];
+        checklist = await ensureChecklistForTask(taskCreate.taskId, pdfList);
+        checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
+        if (!checklistItems.length && getChecklistItems) {
+          checklistItems = await getChecklistItems(taskCreate.taskId);
+        }
       } catch (e) {
         checklist = { ok: false, action: 'error', error: e?.message || String(e) };
       }
     }
-  }
-
-  const checklistSyncSummary = checklist?.ok ? {
-    added: Array.isArray(checklist.added) ? checklist.added.length : 0,
-    updated: Array.isArray(checklist.updated) ? checklist.updated.length : 0,
-    deleted: Array.isArray(checklist.deleted) ? checklist.deleted.length : 0,
-    removedOther: Array.isArray(checklist.removedOther) ? checklist.removedOther.length : 0,
-    totalPdfItems: Number(checklist.totalPdfItems || 0),
-    fullyComplete: Boolean(checklist.fullyComplete),
-  } : null;
-
-  if (checklistSyncSummary) {
-    console.log(JSON.stringify({
-      ts: new Date().toISOString(),
-      level: 'info',
-      event: 'SPA1048_CHECKLIST_SYNC',
-      itemId,
-      taskId: activeTaskId || taskCreate?.taskId || null,
-      checklistSync: checklistSyncSummary,
-    }));
   }
 
   const autoCloseTargetTaskId = activeTaskId || taskId || taskCreate?.taskId || null;
@@ -384,7 +376,6 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     checklist,
     files,
     taskAutoClose: debug ? taskAutoClose : undefined,
-    checklistSync: debug ? checklistSyncSummary : undefined,
     debug: debug ? { filesEnabled, entityTypeId, deadlineOrig, deadlineCamel } : undefined,
   };
 }
