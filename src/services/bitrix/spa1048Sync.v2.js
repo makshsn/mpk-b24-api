@@ -1,5 +1,7 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
 const { normalizeSpaFiles } = require('./spa1048Files.v1');
@@ -9,7 +11,7 @@ const checklistModulePath = path.join(__dirname, 'taskChecklistSync.v1.js');
 const checklistModule = fs.existsSync(checklistModulePath) ? require('./taskChecklistSync.v1') : null;
 const ensureChecklistForTask = checklistModule?.ensureChecklistForTask;
 const getChecklistItems = checklistModule?.getChecklistItems;
-const isChecklistFullyComplete = checklistModule?.isChecklistFullyComplete;
+const isChecklistFullyCompleteExternal = checklistModule?.isChecklistFullyComplete;
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
@@ -38,7 +40,7 @@ function normalizeStageId(x) {
   return String(x).trim().replace(/^['"]+|['"]+$/g, '');
 }
 
-function isChecklistFullyComplete(items) {
+function isChecklistFullyCompleteLocal(items) {
   if (!Array.isArray(items) || items.length === 0) return false;
   return items.every((it) => String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y');
 }
@@ -196,7 +198,8 @@ async function autoCloseTaskByChecklist({
     return { ok: true, action: 'skip_checklist_empty', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
-  if (!isChecklistFullyComplete || !isChecklistFullyComplete(checklistItems)) {
+  const checklistComplete = isChecklistFullyCompleteExternal || isChecklistFullyCompleteLocal;
+  if (!checklistComplete(checklistItems)) {
     return { ok: true, action: 'skip_checklist_not_complete', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
