@@ -1,0 +1,73 @@
+
+  // ---- чеклист в spa-event временно отключён (не влияет на ZIP/создание задач) ----
+  let checklist = { ok: true, action: 'skipped' };
+
+
+
+  // --- Создание задачи, если нет активной (в т.ч. удалена/выполнена) ---
+  const accountantId = Number(process.env.SPA1048_ACCOUNTANT_ID || cfg.accountantId || 70);
+  let taskCreate = null;
+
+  if (!activeTaskId) {
+    const pdfNames = files?.pdfNames || [];
+    taskCreate = await createPaymentTaskIfMissing({
+      entityTypeId,
+      itemId,
+      itemTitle: item.title || item.TITLE || '',
+      deadline: taskDeadlineIso(deadline),
+      taskId: 0,
+      pdfNames,
+      responsibleId: Number(item.assignedById || item.ASSIGNED_BY_ID || accountantId),
+    });
+  }
+
+  return {
+    ok: true,
+    itemId: Number(itemId),
+    stageId,
+    deadline,
+    ensuredDeadline,
+    taskId: activeTaskId || taskCreate?.taskId || null,
+    taskCheck,
+    taskCreate,
+    taskDeadlineSync,
+    files,
+    checklist,
+    debug: debug ? { filesEnabled, entityTypeId, deadlineOrig, deadlineCamel } : undefined,
+  };
+
+
+async function handleSpaEvent(req, res) {
+  try {
+    const b = req.body || {};
+    const q = req.query || {};
+
+    const raw = (
+      req.query?.itemId ??
+      req.query?.id ??
+      req.body?.data?.FIELDS?.ID ??
+      req.body?.data?.FIELDS?.id ??
+      req.body?.FIELDS?.ID ??
+      req.body?.FIELDS?.id ??
+      req.body?.itemId ??
+      req.body?.id
+    );
+    const itemId = Number(raw);
+
+    if (!Number.isFinite(itemId) || itemId <= 0) {
+      return res.status(400).json({ ok: false, error: `invalid_itemId:${raw}` });
+    }
+
+    const debug = String(q.debug ?? b.debug ?? '0') === '1';
+
+    const result = await withItemLock(itemId, async () => {
+      return await syncSpa1048Item({ itemId, debug });
+    });
+
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+}
+
+module.exports = { handleSpaEvent, syncSpa1048Item, withItemLock };

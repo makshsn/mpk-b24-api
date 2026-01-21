@@ -52,10 +52,9 @@ async function spaEvent(req, res) {
 
     req.query = req.query || {};
     req.query.itemId = String(itemId);
-    req.body = req.body || {};
-    req.body.itemId = itemId;
+
     return await handleSpaEvent(req, res);
-} catch (e) {
+  } catch (e) {
     const msg = e?.message || String(e);
     console.log('[spa1048] ERROR:', msg);
     return res.status(500).json({ ok: false, error: msg });

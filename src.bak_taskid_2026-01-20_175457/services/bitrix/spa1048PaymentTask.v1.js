@@ -62,7 +62,7 @@ async function setSpaTaskId({ entityTypeId, itemId, taskId }) {
   await bitrix.call('crm.item.update', {
     entityTypeId: Number(entityTypeId),
     id: Number(itemId),
-    fields: { [taskIdField]: Number(taskId) , ufCrm8TaskId: Number(taskId) },
+    fields: { [taskIdField]: Number(taskId) },
   }, { ctx: { step: 'crm_set_task_id', itemId, taskId, taskIdField } });
 }
 

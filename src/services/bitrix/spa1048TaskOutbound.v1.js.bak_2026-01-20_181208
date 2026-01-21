@@ -1,88 +1,20 @@
 const axios = require('axios');
 const bitrix = require('./bitrixClient');
-const cfg = require('../../config/spa1048');
 const { verifyOutboundToken, extractTaskId, ensureObjectBody } = require('./b24Outbound.v1');
 
 const SPA_ENTITY_TYPE_ID = 1048;
 const SUCCESS_STAGE = 'DT1048_14:SUCCESS';
-
-const SPA_TASK_ID_FIELD = process.env.SPA1048_TASK_ID_FIELD_ORIG || cfg.taskIdField || 'UF_CRM_8_TASK_ID';
-const SPA_DEADLINE_FIELD = process.env.SPA1048_DEADLINE_FIELD_ORIG || cfg.deadlineField || 'UF_CRM_8_1768219591855';
-
-function dateOnly(x) {
-  if (!x) return null;
-  return String(x).slice(0, 10);
-}
-
-// UF_CRM_8_176... -> ufCrm8_176...
-function ufToCamel(uf) {
-  const s = String(uf || '').trim();
-  if (!s) return '';
-  if (!/^UF_/i.test(s)) return s;
-
-  const lower = s.toLowerCase();
-  const parts = lower.split('_').filter(Boolean); // ['uf','crm','8','176...']
-  if (!parts.length) return '';
-
-  let out = parts[0]; // uf
-  for (let i = 1; i < parts.length; i++) {
-    const p = parts[i];
-    if (i === 1) { out += p.charAt(0).toUpperCase() + p.slice(1); continue; } // crm -> Crm
-    if (/^\d+$/.test(p) && i === 2) { out += p; continue; } // 8
-    out += '_' + p; // остальное
-  }
-  return out;
-}
+const SPA_TASK_ID_FIELD = process.env.SPA1048_TASK_ID_FIELD_ORIG || 'UF_CRM_8_TASK_ID';
 
 async function writeTaskIdToSpa({ itemId, taskId }) {
-  // Пишем и UF_* (ориг), и camelCase — максимально надёжно
-  const camel = ufToCamel(SPA_TASK_ID_FIELD) || 'ufCrm8TaskId';
-
   await bitrix.call('crm.item.update', {
     entityTypeId: SPA_ENTITY_TYPE_ID,
     id: Number(itemId),
-    useOriginalUfNames: 'Y',
     fields: {
       [SPA_TASK_ID_FIELD]: Number(taskId),
-      [camel]: Number(taskId),
     },
   });
 }
-
-async function getSpaItem(itemId) {
-  const r = await bitrix.call('crm.item.get', {
-    entityTypeId: SPA_ENTITY_TYPE_ID,
-    id: Number(itemId),
-    select: ['*'],
-  });
-  return r?.result?.item || r?.item || r?.result || r;
-}
-
-async function syncSpaDeadlineFromTask({ itemId, taskYmd }) {
-  if (!taskYmd) return { ok: true, action: 'skip_no_task_deadline' };
-
-  const item = await getSpaItem(itemId);
-
-  const camel = ufToCamel(SPA_DEADLINE_FIELD) || 'ufCrm8_1768219591855';
-  const spaYmd = dateOnly(item?.[camel] || item?.[SPA_DEADLINE_FIELD] || null);
-
-  if (spaYmd === taskYmd) {
-    return { ok: true, action: 'no_change', deadline: taskYmd };
-  }
-
-  await bitrix.call('crm.item.update', {
-    entityTypeId: SPA_ENTITY_TYPE_ID,
-    id: Number(itemId),
-    useOriginalUfNames: 'Y',
-    fields: {
-      [SPA_DEADLINE_FIELD]: taskYmd,
-      [camel]: taskYmd,
-    },
-  });
-
-  return { ok: true, action: 'spa_deadline_updated_from_task', from: spaYmd || null, to: taskYmd };
-}
-
 function parseSpaBinding(ufCrmTask) {
   const arr = Array.isArray(ufCrmTask) ? ufCrmTask : (ufCrmTask ? [ufCrmTask] : []);
   const bind = arr.map(String).find(x => /^T[0-9a-fA-F]+_\d+$/.test(x));
@@ -100,29 +32,35 @@ function parseSpaBinding(ufCrmTask) {
 }
 
 function unwrapTaskGet(resp) {
+  // bitrixClient.call() у тебя может возвращать по-разному: result.task / task / result
   return resp?.result?.task || resp?.task || resp?.result || null;
 }
 
 async function tasksTaskGet(taskId) {
+  // 1) нормальный путь через bitrix.call (обычно надёжнее, чем GET+query)
   try {
     const r = await bitrix.call('tasks.task.get', {
       taskId: Number(taskId),
-      select: ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'UF_CRM_TASK', 'DEADLINE'],
+      select: ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'UF_CRM_TASK'],
     });
     const task = unwrapTaskGet(r);
     if (task && (task.ID || task.id)) return task;
-  } catch (e) {}
+  } catch (e) {
+    // упадём в fallback ниже
+  }
 
+  // 2) fallback: сырой GET (на случай если bitrixClient.call где-то сериализует параметры не так)
   const base = (process.env.BITRIX_WEBHOOK_BASE || '').replace(/\/+$/, '');
   if (!base) return { __error: 'BITRIX_WEBHOOK_BASE_missing' };
 
   const sp = new URLSearchParams();
   sp.set('taskId', String(taskId));
-  ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'UF_CRM_TASK', 'DEADLINE'].forEach(f => sp.append('select[]', f));
+  ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'UF_CRM_TASK'].forEach(f => sp.append('select[]', f));
   const url = `${base}/tasks.task.get.json?${sp.toString()}`;
 
   try {
     const r = await axios.get(url, { timeout: 20000 });
+    // tasks.task.get должен отдавать result.task, но если вдруг прилетает иначе — покажем raw
     const task = r?.data?.result?.task || null;
     if (task) return task;
     return { __error: 'no_task_in_response', url, raw: r?.data ?? null };
@@ -132,6 +70,8 @@ async function tasksTaskGet(taskId) {
 }
 
 async function getChecklist(taskId) {
+  // В Bitrix для checklist getlist часто параметр именно TASKID (uppercase)
+  // Поэтому делаем попытку так, и fallback на taskId если портал принимает и так.
   let r;
   try {
     r = await bitrix.call('task.checklistitem.getlist', { TASKID: Number(taskId) });
@@ -181,25 +121,19 @@ async function handleTaskEvent(req, res) {
       debug: { hasUfCrmTask: !!uf, ufPreview: uf || null }
     });
   }
-
-  // Всегда пишем ID задачи в карточку SPA
-  await writeTaskIdToSpa({ itemId: binding.itemId, taskId });
+// Пишем ID задачи в карточку SPA (чтобы поле "Task ID" всегда было заполнено)
+await writeTaskIdToSpa({ itemId: binding.itemId, taskId });
 
   if (binding.entityTypeId !== SPA_ENTITY_TYPE_ID) {
     return res.json({ ok: true, action: 'skip_other_entityType', taskId, binding });
   }
 
-  // ✅ ВАЖНО: синхра дедлайна ЗАДАЧА -> SPA
-  const taskYmd = dateOnly(task?.DEADLINE || task?.deadline || null);
-  const deadlineSync = await syncSpaDeadlineFromTask({ itemId: binding.itemId, taskYmd });
-
-  // дальше твоя старая логика по чеклисту/успеху
   const cl = await getChecklist(taskId);
-  if (cl.total === 0) return res.json({ ok: true, action: 'no_checklist', taskId, binding, checklist: cl, deadlineSync });
-  if (cl.done < cl.total) return res.json({ ok: true, action: 'not_fully_paid', taskId, binding, checklist: cl, deadlineSync });
+  if (cl.total === 0) return res.json({ ok: true, action: 'no_checklist', taskId, binding, checklist: cl });
+  if (cl.done < cl.total) return res.json({ ok: true, action: 'not_fully_paid', taskId, binding, checklist: cl });
 
   await moveSpaToSuccess(binding.itemId);
-  return res.json({ ok: true, action: 'moved_to_success', taskId, binding, checklist: cl, stageId: SUCCESS_STAGE, deadlineSync });
+  return res.json({ ok: true, action: 'moved_to_success', taskId, binding, checklist: cl, stageId: SUCCESS_STAGE });
 }
 
 module.exports = { handleTaskEvent };

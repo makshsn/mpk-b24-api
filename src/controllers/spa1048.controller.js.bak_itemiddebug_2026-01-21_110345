@@ -14,22 +14,16 @@ function extractItemId(req) {
   const b = req.body || {};
   const q2 = parseQueryFromUrl(req);
 
-  // самый надёжный источник сейчас — q2 (мы уже видим, что там itemId есть)
-  let raw = q2.itemId ?? q2.id ?? q.itemId ?? q.id;
+  const raw =
+    q.itemId ?? q.id ??
+    q2.itemId ?? q2.id ??
+    b.itemId ?? b.id ??
+    b?.data?.FIELDS?.ID ?? b?.data?.FIELDS?.id ??
+    b?.FIELDS?.ID ?? b?.FIELDS?.id ??
+    b?.data?.FIELDS_AFTER?.ID ?? b?.data?.FIELDS_AFTER?.id ??
+    b?.data?.FIELDS_BEFORE?.ID ?? b?.data?.FIELDS_BEFORE?.id;
 
-  if (raw === undefined || raw === null || raw === '') {
-    raw =
-      b.itemId ?? b.id ??
-      b?.data?.FIELDS?.ID ?? b?.data?.FIELDS?.id ??
-      b?.FIELDS?.ID ?? b?.FIELDS?.id ??
-      b?.data?.FIELDS_AFTER?.ID ?? b?.data?.FIELDS_AFTER?.id ??
-      b?.data?.FIELDS_BEFORE?.ID ?? b?.data?.FIELDS_BEFORE?.id;
-  }
-
-  const str = String(raw ?? '').trim();
-  const n = Number(str);
-  console.log('[spa1048] dbg itemId raw=', raw, ' str=', str, ' n=', n);
-
+  const n = Number(String(raw ?? '').trim());
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -52,10 +46,9 @@ async function spaEvent(req, res) {
 
     req.query = req.query || {};
     req.query.itemId = String(itemId);
-    req.body = req.body || {};
-    req.body.itemId = itemId;
+
     return await handleSpaEvent(req, res);
-} catch (e) {
+  } catch (e) {
     const msg = e?.message || String(e);
     console.log('[spa1048] ERROR:', msg);
     return res.status(500).json({ ok: false, error: msg });
