@@ -1,7 +1,5 @@
 'use strict';
 
-const fs = require('fs');
-const path = require('path');
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
 const { normalizeSpaFiles } = require('./spa1048Files.v1');
@@ -38,6 +36,11 @@ function dateOnly(x) {
 function normalizeStageId(x) {
   if (!x) return '';
   return String(x).trim().replace(/^['"]+|['"]+$/g, '');
+}
+
+function isChecklistFullyComplete(items) {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  return items.every((it) => String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y');
 }
 
 // UF_CRM_8_176... -> ufCrm8_176...
@@ -315,7 +318,7 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     } catch (e) {
       checklist = { ok: false, action: 'error', error: e?.message || String(e) };
     }
-  } else if (!ensureChecklistForTask) {
+  } else if (!ensurePdfChecklist) {
     checklist = { ok: false, action: 'skipped', reason: 'module_missing' };
   }
 
@@ -336,7 +339,7 @@ async function syncSpa1048Item({ itemId, debug = false }) {
       stageId,
     });
 
-    if (taskCreate?.taskId && ensureChecklistForTask) {
+    if (taskCreate?.taskId && ensurePdfChecklist) {
       try {
         const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
         checklist = await ensureChecklistForTask(taskCreate.taskId, pdfList);
