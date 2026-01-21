@@ -142,10 +142,17 @@ async function getChecklist(taskId) {
   return Array.isArray(items) ? items : [];
 }
 
-async function addChecklistItem(taskId, title, sortIndex) {
+async function addChecklistItem(taskId, title, sortIndex, parentId) {
+  const fields = {
+    TITLE: String(title),
+    SORT_INDEX: Number(sortIndex || 0),
+  };
+  if (Number.isFinite(Number(parentId)) && Number(parentId) >= 0) {
+    fields.PARENT_ID = Number(parentId);
+  }
   const r = await bitrix.call('task.checklistitem.add', {
     taskId: Number(taskId),
-    fields: { TITLE: String(title), SORT_INDEX: Number(sortIndex || 0) },
+    fields,
   }, { ctx: { taskId, step: 'checklist_add' } });
   const u = unwrap(r);
   const id = Number(u?.item?.id || u?.ID || u?.id || u);
@@ -300,6 +307,11 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       return {
         ok: true,
         mode: 'pdf',
+        rootId,
+        desiredKeys,
+        existingKeys,
+        toDeleteIds,
+        toAddKeys,
         desiredTotal: normalizedPdfList.length,
         removed,
         added,
@@ -311,6 +323,13 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     const desired = parseChecklistTitles();
     const desiredMap = new Map(desired.map((t) => [normTitle(t), t]));
     const kept = new Set();
+    const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
+    const existingKeys = scopedItems
+      .map((it) => getManagedKeyFromTitle(it?.TITLE || it?.title))
+      .filter(Boolean);
+    const existingKeySet = new Set(existingKeys);
+    const toDeleteIds = [];
+    const toAddKeys = desiredKeys.filter((key) => !existingKeySet.has(key));
     let softIndex = 10000;
 
     for (const it of scopedItems) {
@@ -356,6 +375,11 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     return {
       ok: true,
       mode: 'static',
+      rootId,
+      desiredKeys,
+      existingKeys,
+      toDeleteIds,
+      toAddKeys,
       desiredTotal: desired.length,
       removed,
       added,
