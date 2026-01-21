@@ -25,6 +25,45 @@ function uniq(arr) {
   return out;
 }
 
+function parseChecklistTitles() {
+  const raw = process.env.SPA1048_CHECKLIST_TITLES;
+  if (!raw) {
+    return [
+      'Счёт выставлен',
+      'Согласование получено',
+      'Поступление денег подтверждено',
+    ];
+  }
+  return String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function normalizePdfList(pdfList) {
+  if (!Array.isArray(pdfList)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const it of pdfList) {
+    const name = String(it?.name || '').trim();
+    const fileId = toNum(it?.fileId || it?.id || it?.FILE_ID);
+    if (!name || !fileId || !name.toLowerCase().endsWith('.pdf')) continue;
+    if (seen.has(fileId)) continue;
+    seen.add(fileId);
+    out.push({ fileId, name });
+  }
+  return out;
+}
+
+function buildPdfTitle({ fileId, name }) {
+  return `Оплатить: ${name} [file:${fileId}]`;
+}
+
+function extractFileIdFromTitle(title) {
+  const match = String(title || '').match(/\[file:(\d+)\]/i);
+  return match ? toNum(match[1]) : 0;
+}
+
 async function addTask({ title, description, responsibleId, deadline, crmBindings }) {
   const fields = {
     TITLE: String(title || ''),
@@ -46,6 +85,14 @@ async function addTask({ title, description, responsibleId, deadline, crmBinding
   return taskId;
 }
 
+async function getTask(taskId) {
+  const r = await bitrix.call('tasks.task.get', {
+    taskId: Number(taskId),
+    select: ['ID', 'STATUS'],
+  }, { ctx: { step: 'task_get_for_create', taskId } });
+  const t = r?.task || r?.result?.task || r?.result;
+  return t || null;
+}
 
 async function bindTaskToCrm(taskId, crmBindings) {
   if (!Array.isArray(crmBindings) || !crmBindings.length) return;
@@ -82,27 +129,153 @@ async function addChecklistItem(taskId, title, sortIndex) {
   }, { ctx: { step: 'checklist_add', taskId } });
 }
 
-async function ensurePdfChecklist({ taskId, pdfNames }) {
-  const titles = uniq(pdfNames).filter(x => x.toLowerCase().endsWith('.pdf'));
-  if (!titles.length) return { ok: true, total: 0, done: 0, added: [] };
+async function updateChecklistItem(taskId, itemId, fields) {
+  await bitrix.call('task.checklistitem.update', {
+    taskId: Number(taskId),
+    id: Number(itemId),
+    fields,
+  }, { ctx: { step: 'checklist_update', taskId, itemId } });
+}
 
+async function deleteChecklistItem(taskId, itemId) {
+  await bitrix.call('task.checklistitem.delete', {
+    taskId: Number(taskId),
+    id: Number(itemId),
+  }, { ctx: { step: 'checklist_delete', taskId, itemId } });
+}
+
+async function safeDeleteChecklistItem(taskId, item) {
+  const itemId = toNum(item?.ID || item?.id);
+  if (!itemId) return { ok: false, action: 'skip_no_id' };
+  try {
+    await deleteChecklistItem(taskId, itemId);
+    return { ok: true, action: 'deleted', id: itemId };
+  } catch (e) {
+    const title = String(item?.TITLE || item?.title || '').trim();
+    const softTitle = title.startsWith('[REMOVED]') ? title : `[REMOVED] ${title || 'item'}`;
+    try {
+      await updateChecklistItem(taskId, itemId, {
+        TITLE: softTitle,
+        SORT_INDEX: 9999,
+      });
+      return { ok: true, action: 'soft_deleted', id: itemId };
+    } catch (err) {
+      return { ok: false, action: 'delete_failed', id: itemId, error: err?.message || String(err) };
+    }
+  }
+}
+
+function isCompleteItem(it) {
+  return String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y';
+}
+
+async function ensurePdfChecklist({ taskId, pdfList }) {
+  const normalizedPdfList = normalizePdfList(pdfList);
   const items = await getChecklist(taskId);
-  const existing = new Set(items.map(i => String(i.TITLE || i.title || '').trim().toLowerCase()).filter(Boolean));
 
+  const pdfItems = [];
+  const otherItems = [];
+
+  for (const it of items) {
+    const title = String(it?.TITLE || it?.title || '').trim();
+    if (extractFileIdFromTitle(title)) pdfItems.push(it);
+    else otherItems.push(it);
+  }
+
+  const mapExisting = new Map();
+  for (const it of pdfItems) {
+    const fileId = extractFileIdFromTitle(it?.TITLE || it?.title);
+    if (!fileId || mapExisting.has(fileId)) continue;
+    mapExisting.set(fileId, it);
+  }
+
+  const setWanted = new Set(normalizedPdfList.map((p) => p.fileId));
   const added = [];
-  let sort = 1;
+  const updated = [];
+  const deleted = [];
+  const removedOther = [];
 
-  for (const t of titles) {
-    const key = t.toLowerCase();
-    if (existing.has(key)) { sort++; continue; }
-    await addChecklistItem(taskId, t, sort++);
-    added.push(t);
+  let sortIndex = 1;
+  for (const pdf of normalizedPdfList) {
+    const existing = mapExisting.get(pdf.fileId);
+    const title = buildPdfTitle(pdf);
+    if (existing) {
+      const existingTitle = String(existing?.TITLE || existing?.title || '').trim();
+      if (existingTitle !== title) {
+        const itemId = toNum(existing?.ID || existing?.id);
+        if (itemId) {
+          await updateChecklistItem(taskId, itemId, { TITLE: title, SORT_INDEX: sortIndex });
+          updated.push({ id: itemId, fileId: pdf.fileId });
+        }
+      }
+    } else {
+      await addChecklistItem(taskId, title, sortIndex);
+      added.push({ fileId: pdf.fileId, title });
+    }
+    sortIndex++;
+  }
+
+  if (normalizedPdfList.length > 0) {
+    for (const it of otherItems) {
+      removedOther.push(await safeDeleteChecklistItem(taskId, it));
+    }
+  } else {
+    const desired = parseChecklistTitles();
+    const desiredMap = new Map(desired.map((t) => [t.toLowerCase(), t]));
+    const existingStatic = new Map();
+
+    for (const it of otherItems) {
+      const title = String(it?.TITLE || it?.title || '').trim();
+      const key = title.toLowerCase();
+      if (!key || !desiredMap.has(key) || existingStatic.has(key)) {
+        removedOther.push(await safeDeleteChecklistItem(taskId, it));
+        continue;
+      }
+      existingStatic.set(key, it);
+
+      const desiredTitle = desiredMap.get(key);
+      if (title !== desiredTitle) {
+        const itemId = toNum(it?.ID || it?.id);
+        if (itemId) {
+          await updateChecklistItem(taskId, itemId, { TITLE: desiredTitle });
+          updated.push({ id: itemId, title: desiredTitle });
+        }
+      }
+    }
+
+    let staticSort = 1;
+    for (const title of desired) {
+      const key = title.toLowerCase();
+      if (existingStatic.has(key)) {
+        staticSort++;
+        continue;
+      }
+      await addChecklistItem(taskId, title, staticSort++);
+      added.push({ title });
+    }
+  }
+
+  for (const it of pdfItems) {
+    const fileId = extractFileIdFromTitle(it?.TITLE || it?.title);
+    if (!fileId || setWanted.has(fileId)) continue;
+    deleted.push(await safeDeleteChecklistItem(taskId, it));
   }
 
   const after = await getChecklist(taskId);
-  const done = after.filter(i => String(i.IS_COMPLETE || i.isComplete || '').toUpperCase() === 'Y').length;
+  const itemsWithMarker = after.filter((it) => extractFileIdFromTitle(it?.TITLE || it?.title));
+  const fullyComplete = itemsWithMarker.length > 0 && itemsWithMarker.every(isCompleteItem);
 
-  return { ok: true, total: after.length, done, added, items: after };
+  return {
+    ok: true,
+    added,
+    updated,
+    deleted,
+    removedOther,
+    totalPdfItems: itemsWithMarker.length,
+    fullyComplete,
+    items: after,
+    itemsWithMarker,
+  };
 }
 
 async function moveSpaToSuccess({ entityTypeId, itemId }) {
@@ -135,9 +308,52 @@ async function findSpaByTaskId({ entityTypeId, taskId }) {
   return null;
 }
 
-async function createPaymentTaskIfMissing({ entityTypeId, itemId, itemTitle, deadline, taskId, pdfNames, responsibleId }) {
-  if (taskId) {
-    return { ok: true, action: 'skip_task_exists', taskId: Number(taskId) };
+async function createPaymentTaskIfMissing({
+  entityTypeId,
+  itemId,
+  itemTitle,
+  deadline,
+  taskId,
+  pdfNames,
+  responsibleId,
+  stageId,
+}) {
+  const existingTaskId = toNum(taskId);
+  const stage = String(stageId || '');
+
+  if (existingTaskId) {
+    try {
+      const task = await getTask(existingTaskId);
+      const status = Number(task?.status || task?.STATUS || 0) || 0;
+      if (status === 5) {
+        let movedToSuccess = false;
+        if (stage !== 'DT1048_14:SUCCESS') {
+          try {
+            await moveSpaToSuccess({ entityTypeId, itemId });
+            movedToSuccess = true;
+          } catch (e) {
+            return {
+              ok: false,
+              action: 'task_completed_skip_create',
+              taskId: existingTaskId,
+              status,
+              error: e?.message || String(e),
+            };
+          }
+        }
+        return {
+          ok: true,
+          action: 'task_completed_skip_create',
+          taskId: existingTaskId,
+          status,
+          movedToSuccess,
+        };
+      }
+
+      return { ok: true, action: 'skip_task_exists', taskId: existingTaskId, status };
+    } catch (e) {
+      // если задача удалена/не найдена — создаём новую
+    }
   }
 
   const pdfs = uniq(pdfNames).filter(x => x.toLowerCase().endsWith('.pdf'));

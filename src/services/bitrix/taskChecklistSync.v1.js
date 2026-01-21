@@ -95,6 +95,11 @@ function isDone(it) {
   return String(v).toUpperCase() === 'Y' || String(v) === '1' || v === true;
 }
 
+function isChecklistFullyComplete(items) {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  return items.every((it) => String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y');
+}
+
 async function safeRemoveChecklistItem(taskId, item, softIndex) {
   const itemId = toNum(item?.ID || item?.id);
   if (!itemId) return { ok: false, action: 'skip_no_id' };
@@ -153,12 +158,14 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         added.push(addedItem);
       }
 
+      const items = await getChecklist(taskId);
       return {
         ok: true,
         mode: 'pdf',
         desiredTotal: normalizedPdfList.length,
         removed,
         added,
+        items,
       };
     }
 
@@ -200,12 +207,14 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       added.push(addedItem);
     }
 
+    const items = await getChecklist(taskId);
     return {
       ok: true,
       mode: 'static',
       desiredTotal: desired.length,
       removed,
       added,
+      items,
     };
   } catch (e) {
     log('error', 'CHECKLIST_ENSURE_FAIL', { taskId, error: e?.message || String(e) });
@@ -222,6 +231,8 @@ async function getChecklistSummary(taskId) {
 
 module.exports = {
   ensureChecklistForTask,
+  isChecklistFullyComplete,
+  getChecklistItems: getChecklist,
   getChecklistSummary,
   buildPdfTitle,
 };
