@@ -52,36 +52,32 @@ function hashName(name) {
   return Math.abs(h).toString(36);
 }
 
-function pdfMarker({ fileId, name }) {
+function pdfMarker(fileId) {
   const id = toNum(fileId);
+  const nameKey = normalizeNameKey(name);
+  const nameHash = nameKey ? hashName(nameKey) : '';
+  if (id > 0 && nameHash) return `pdf:${id}|${nameHash}`;
   if (id > 0) return `pdf:${id}`;
-  const key = normalizeNameKey(name);
-  if (!key) return '';
-  return `pdfname:${hashName(key)}`;
+  if (nameHash) return `pdfname:${nameHash}`;
+  return 'pdfname:unknown';
 }
 
 function buildPdfTitle({ name, fileId }) {
-  const marker = pdfMarker({ fileId, name });
+  const marker = pdfMarker(fileId);
   return marker ? `Оплатить: ${name} [${marker}]` : `Оплатить: ${name}`;
 }
 
-function parseMarkerFromTitle(title) {
+function parsePdfMarkerFromTitle(title) {
   const text = String(title || '').trim();
-  const pdfMatch = text.match(/\[pdf:(\d+)/i);
-  if (pdfMatch) {
-    return { kind: 'pdf', key: `pdf:${pdfMatch[1]}`, fileId: toNum(pdfMatch[1]), nameHash: '' };
-  }
-  const pdfNameMatch = text.match(/\[pdfname:([^\]\|]+)/i);
-  if (pdfNameMatch) {
-    const nameHash = String(pdfNameMatch[1]).trim().toLowerCase();
-    return { kind: 'pdfname', key: `pdfname:${nameHash}`, fileId: 0, nameHash };
-  }
-  const staticMatch = text.match(/\[static:([^\]\|]+)/i);
-  if (staticMatch) {
-    const key = `static:${String(staticMatch[1]).trim().toLowerCase()}`;
-    return { kind: 'static', key, fileId: 0, nameHash: '' };
-  }
-  return { kind: null, key: '', fileId: 0, nameHash: '' };
+  const match = text.match(/\[(pdf|file):([0-9]+)(?:[^\]]*)\]\s*$/i);
+  if (!match) return 0;
+  return toNum(match[2]);
+}
+
+function parseStaticMarkerFromTitle(title) {
+  const text = String(title || '').trim();
+  const match = text.match(/\[static:([^\]]+)\]\s*$/i);
+  return match ? String(match[1]).trim().toLowerCase() : '';
 }
 
 function isRootChecklistItem(item) {
@@ -96,8 +92,47 @@ function buildStaticTitle(title) {
   return key ? `${title} [static:${key}]` : title;
 }
 
-function getManagedKeyFromTitle(title) {
-  return parseMarkerFromTitle(title).key || '';
+function extractNameFromTitle(title) {
+  const text = String(title || '').trim();
+  const match = text.match(/^Оплатить:\s*(.+?)(?:\s*\[|$)/i);
+  return match ? match[1].trim() : '';
+}
+
+function parsePdfMarkerFromTitle(title) {
+  const text = String(title || '').trim();
+  const match = text.match(/\[([^\]]+)\]\s*$/);
+  if (!match) return { fileId: 0, nameHash: '' };
+  const marker = match[1].trim();
+
+  const legacy = marker.match(/^file:(\d+)$/i);
+  if (legacy) return { fileId: toNum(legacy[1]), nameHash: '' };
+
+  const pdfMatch = marker.match(/^pdf:(.+)$/i);
+  if (pdfMatch) {
+    const parts = pdfMatch[1].split('|');
+    const fileId = toNum(parts[0]);
+    const nameHash = parts[1] ? String(parts[1]).trim() : '';
+    return { fileId, nameHash };
+  }
+
+  const nameMatch = marker.match(/^pdfname:(.+)$/i);
+  if (nameMatch) return { fileId: 0, nameHash: String(nameMatch[1]).trim() };
+
+  return { fileId: 0, nameHash: '' };
+}
+
+function getPdfIdentityFromItem(item) {
+  const title = String(item?.TITLE || item?.title || '').trim();
+  const name = extractNameFromTitle(title);
+  const nameKey = normalizeNameKey(name);
+  const { fileId, nameHash } = parsePdfMarkerFromTitle(title);
+  return {
+    title,
+    name,
+    nameKey,
+    fileId,
+    nameHash,
+  };
 }
 
 async function getChecklist(taskId) {
@@ -180,12 +215,10 @@ function normalizePdfList(pdfList) {
     if (!name || !isPdfName(name)) continue;
     const fileId = toNum(it?.fileId || it?.id || it?.FILE_ID);
     const nameKey = normalizeNameKey(name);
-    const markerKey = pdfMarker({ fileId, name });
-    if (!markerKey) continue;
-    const key = `${markerKey}|${nameKey}`;
+    const key = `${nameKey}|${fileId || '0'}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ name, fileId, nameKey, markerKey });
+    out.push({ name, fileId, nameKey });
   }
   return out;
 }
@@ -221,7 +254,12 @@ function buildChecklistSummary(items, rootId, managedOnly = true) {
 async function ensureChecklistForTask(taskId, pdfList = []) {
   try {
     const existing = await getChecklist(taskId);
-    const { rootId } = await ensureRoot(taskId, existing);
+    const root = existing.find((it) => {
+      const title = String(it?.TITLE || it?.title || '').trim();
+      const parentId = toNum(it?.PARENT_ID || it?.parentId);
+      return parentId === 0 && title.startsWith('BX_CHECKLIST_');
+    });
+    const rootId = root ? toNum(root?.ID || root?.id) : 0;
     const scopedItems = rootId
       ? existing.filter((it) => toNum(it?.PARENT_ID || it?.parentId) === rootId)
       : existing.filter((it) => !isRootChecklistItem(it));
@@ -231,29 +269,40 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     const updated = [];
 
     if (normalizedPdfList.length > 0) {
-      const managedItems = scopedItems
-        .map((it) => ({ item: it, key: getManagedKeyFromTitle(it?.TITLE || it?.title) }))
-        .filter((entry) => entry.key);
+      const pdfItems = [];
+      const otherItems = [];
+      for (const it of existing) {
+        const identity = getPdfIdentityFromItem(it);
+        if (identity.fileId || identity.nameHash || identity.nameKey) {
+          pdfItems.push({ item: it, identity });
+        } else {
+          otherItems.push(it);
+        }
+      }
 
-      const existingByKey = new Map();
-      for (const entry of managedItems) {
+      const existingByFileId = new Map();
+      const existingByNameKey = new Map();
+      for (const entry of pdfItems) {
         const itemId = toNum(entry.item?.ID || entry.item?.id);
         if (!itemId) continue;
-        if (!existingByKey.has(entry.key)) {
-          existingByKey.set(entry.key, entry);
+        if (entry.identity.fileId && !existingByFileId.has(entry.identity.fileId)) {
+          existingByFileId.set(entry.identity.fileId, entry);
+        }
+        if (entry.identity.nameKey && !existingByNameKey.has(entry.identity.nameKey)) {
+          existingByNameKey.set(entry.identity.nameKey, entry);
         }
       }
 
       const usedItemIds = new Set();
-      const desiredKeys = normalizedPdfList.map((pdf) => pdf.markerKey).filter(Boolean);
-      const existingKeys = Array.from(existingByKey.keys());
-      const toDeleteIds = [];
-      const toAddKeys = desiredKeys.filter((key) => !existingByKey.has(key));
       let sortIndex = 1;
 
       for (const pdf of normalizedPdfList) {
-        const key = pdf.markerKey;
-        const matched = key ? existingByKey.get(key) : null;
+        let matched = null;
+        if (pdf.fileId && existingByFileId.has(pdf.fileId)) {
+          matched = existingByFileId.get(pdf.fileId);
+        } else if (pdf.nameKey && existingByNameKey.has(pdf.nameKey)) {
+          matched = existingByNameKey.get(pdf.nameKey);
+        }
 
         const desiredTitle = buildPdfTitle(pdf);
         if (matched) {
@@ -265,18 +314,21 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
             updated.push({ id: itemId, title: desiredTitle });
           }
         } else {
-          const addedItem = await addChecklistItem(taskId, desiredTitle, sortIndex, rootId);
+          const addedItem = await addChecklistItem(taskId, desiredTitle, sortIndex);
           added.push(addedItem);
         }
         sortIndex++;
       }
 
       let softIndex = 10000;
-      for (const entry of managedItems) {
+      for (const entry of pdfItems) {
         const itemId = toNum(entry.item?.ID || entry.item?.id);
         if (!itemId || usedItemIds.has(itemId)) continue;
-        toDeleteIds.push(itemId);
         removed.push(await safeRemoveChecklistItem(taskId, entry.item, softIndex++));
+      }
+
+      for (const it of otherItems) {
+        removed.push(await safeRemoveChecklistItem(taskId, it, softIndex++));
       }
 
       const items = await getChecklist(taskId);
@@ -302,31 +354,36 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
     const desiredMap = new Map(desired.map((t) => [`static:${normTitle(t)}`, t]));
     const kept = new Set();
-    const existingKeys = [];
+    const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
+    const existingKeys = scopedItems
+      .map((it) => getManagedKeyFromTitle(it?.TITLE || it?.title))
+      .filter(Boolean);
+    const existingKeySet = new Set(existingKeys);
     const toDeleteIds = [];
+    const toAddKeys = desiredKeys.filter((key) => !existingKeySet.has(key));
     let softIndex = 10000;
 
     for (const it of scopedItems) {
       const title = String(it?.TITLE || it?.title || '').trim();
-      const managedKey = getManagedKeyFromTitle(title);
-      if (!managedKey) continue;
-      existingKeys.push(managedKey);
-      const desiredTitle = desiredMap.get(managedKey);
-      if (!desiredTitle || kept.has(managedKey)) {
-        const itemId = toNum(it?.ID || it?.id);
-        if (itemId) toDeleteIds.push(itemId);
-        removed.push(await safeRemoveChecklistItem(taskId, it, softIndex++));
+      const markerKey = parseStaticMarkerFromTitle(title);
+      const pdfId = parsePdfMarkerFromTitle(title);
+      const titleKey = normTitle(title);
+      const desiredTitle = desiredMap.get(markerKey || titleKey);
+      if (!desiredTitle || kept.has(markerKey || titleKey)) {
+        if (markerKey || pdfId) {
+          removed.push(await safeRemoveChecklistItem(taskId, it, softIndex++));
+        }
         continue;
       }
-      kept.add(managedKey);
+      kept.add(markerKey || titleKey);
 
       const withMarker = buildStaticTitle(desiredTitle);
       if (title !== withMarker) {
         const itemId = toNum(it?.ID || it?.id);
         if (itemId) {
           try {
-            await updateChecklistItem(taskId, itemId, { TITLE: withMarker });
-            updated.push({ id: itemId, title: withMarker });
+            await updateChecklistItem(taskId, itemId, { TITLE: desiredTitle });
+            updated.push({ id: itemId, title: desiredTitle });
           } catch (e) {
             log('error', 'CHECKLIST_UPDATE_FAIL', { taskId, itemId, error: e?.message || String(e) });
           }
@@ -341,7 +398,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         sortIndex++;
         continue;
       }
-      const addedItem = await addChecklistItem(taskId, buildStaticTitle(t), sortIndex++, rootId);
+      const addedItem = await addChecklistItem(taskId, buildStaticTitle(t), sortIndex++);
       added.push(addedItem);
     }
 

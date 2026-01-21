@@ -11,7 +11,7 @@ const checklistModulePath = path.join(__dirname, 'taskChecklistSync.v1.js');
 const checklistModule = fs.existsSync(checklistModulePath) ? require('./taskChecklistSync.v1') : null;
 const ensureChecklistForTask = checklistModule?.ensureChecklistForTask;
 const getChecklistItems = checklistModule?.getChecklistItems;
-const getChecklistSummary = checklistModule?.getChecklistSummary;
+const isChecklistFullyCompleteExternal = checklistModule?.isChecklistFullyComplete;
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
@@ -38,6 +38,11 @@ function dateOnly(x) {
 function normalizeStageId(x) {
   if (!x) return '';
   return String(x).trim().replace(/^['"]+|['"]+$/g, '');
+}
+
+function isChecklistFullyCompleteLocal(items) {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  return items.every((it) => String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y');
 }
 
 // UF_CRM_8_176... -> ufCrm8_176...
@@ -193,7 +198,8 @@ async function autoCloseTaskByChecklist({
     return { ok: true, action: 'skip_checklist_empty', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
-  if (!checklistSummary.isAllDone) {
+  const checklistComplete = isChecklistFullyCompleteExternal || isChecklistFullyCompleteLocal;
+  if (!checklistComplete(checklistItems)) {
     return { ok: true, action: 'skip_checklist_not_complete', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 

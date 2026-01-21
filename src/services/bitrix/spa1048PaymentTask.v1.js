@@ -177,7 +177,7 @@ async function ensurePdfChecklist({ taskId, pdfList }) {
     const items = Array.isArray(checklist?.items) ? checklist.items : await getChecklist(taskId);
     const itemsWithMarker = items.filter((it) => {
       const title = String(it?.TITLE || it?.title || '').trim();
-      return /\[(pdf|pdfname|static|file):/i.test(title);
+      return /\[(pdf|pdfname|file):/i.test(title);
     });
     const fullyComplete = itemsWithMarker.length > 0 && itemsWithMarker.every(isCompleteItem);
     return {
