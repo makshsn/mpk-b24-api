@@ -9,13 +9,29 @@ function parseQueryFromUrl(req) {
   return qs.parse(u.slice(i + 1));
 }
 
+function ensureRequestId(req) {
+  const headerId = req.headers['x-request-id'] || req.headers['x-requestid'];
+  if (headerId) {
+    req.requestId = String(headerId);
+    return req.requestId;
+  }
+
+  const autoId = `spa1048-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  req.requestId = autoId;
+  return autoId;
+}
+
+function logWithReq(req, ...args) {
+  const rid = req.requestId || 'no-rid';
+  console.log(`[spa1048][rid=${rid}]`, ...args);
+}
+
 function extractItemId(req) {
   const q = req.query || {};
   const b = req.body || {};
   const q2 = parseQueryFromUrl(req);
 
-  // самый надёжный источник сейчас — q2 (мы уже видим, что там itemId есть)
-  let raw = q2.itemId ?? q2.id ?? q.itemId ?? q.id;
+  let raw = q.itemId ?? q.id ?? q2.itemId ?? q2.id;
 
   if (raw === undefined || raw === null || raw === '') {
     raw =
@@ -28,37 +44,41 @@ function extractItemId(req) {
 
   const str = String(raw ?? '').trim();
   const n = Number(str);
-  console.log('[spa1048] dbg itemId raw=', raw, ' str=', str, ' n=', n);
-
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 async function spaEvent(req, res) {
+  const rid = ensureRequestId(req);
+
   try {
     if (req.method === 'POST') {
       const tok = verifyOutboundToken(req, 'B24_OUTBOUND_SPA_TOKEN');
-      if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
+      if (!tok.ok) {
+        logWithReq(req, 'auth_failed', tok.reason);
+        return res.status(403).json({ ok: false, error: tok.reason });
+      }
     }
 
-    // диагностируем, что реально видит контроллер
     const q2 = parseQueryFromUrl(req);
-    console.log('[spa1048] dbg url=', req.originalUrl || req.url, ' q2=', q2);
+    logWithReq(req, 'incoming', req.method, req.originalUrl || req.url, 'q2=', q2);
 
     const itemId = extractItemId(req);
     if (!itemId) {
-      console.log('[spa1048] ERROR: itemId is required');
-      return res.status(400).json({ ok: false, error: 'itemId is required' });
+      logWithReq(req, 'itemId_missing', { query: req.query, bodyKeys: Object.keys(req.body || {}) });
+      return res.status(400).json({ ok: false, error: 'itemId is required', requestId: rid });
     }
 
     req.query = req.query || {};
     req.query.itemId = String(itemId);
     req.body = req.body || {};
     req.body.itemId = itemId;
+
+    logWithReq(req, 'itemId_resolved', itemId);
     return await handleSpaEvent(req, res);
-} catch (e) {
+  } catch (e) {
     const msg = e?.message || String(e);
-    console.log('[spa1048] ERROR:', msg);
-    return res.status(500).json({ ok: false, error: msg });
+    logWithReq(req, 'error', msg);
+    return res.status(500).json({ ok: false, error: msg, requestId: rid });
   }
 }
 

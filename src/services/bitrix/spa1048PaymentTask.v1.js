@@ -181,7 +181,12 @@ async function createPaymentTaskIfMissing({ entityTypeId, itemId, itemTitle, dea
   // привязка задачи к CRM (надежнее вторым шагом)
   await bindTaskToCrm(newTaskId, crmBindings);
 
-  const checklist = await ensurePdfChecklist({ taskId: newTaskId, pdfNames: pdfs });
+  let checklist;
+  try {
+    checklist = await ensurePdfChecklist({ taskId: newTaskId, pdfNames: pdfs });
+  } catch (e) {
+    checklist = { ok: false, error: e?.message || String(e) };
+  }
 
   return { ok: true, action: 'task_created', taskId: newTaskId, checklist };
 }
