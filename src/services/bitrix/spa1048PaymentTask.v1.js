@@ -105,27 +105,6 @@ async function ensurePdfChecklist({ taskId, pdfNames }) {
   return { ok: true, total: after.length, done, added, items: after };
 }
 
-async function isAllPdfPaid({ taskId, pdfNames }) {
-  const titles = uniq(pdfNames).filter(x => x.toLowerCase().endsWith('.pdf'));
-  if (!titles.length) return false;
-
-  const items = await getChecklist(taskId);
-  const map = new Map();
-  for (const it of items) {
-    const title = String(it.TITLE || it.title || '').trim();
-    if (!title) continue;
-    map.set(title.toLowerCase(), String(it.IS_COMPLETE || it.isComplete || '').toUpperCase() === 'Y');
-  }
-
-  // считаем “оплачено”, если ВСЕ ожидаемые pdf есть в чеклисте и отмечены
-  for (const t of titles) {
-    const k = t.toLowerCase();
-    if (!map.has(k)) return false;
-    if (!map.get(k)) return false;
-  }
-  return true;
-}
-
 async function moveSpaToSuccess({ entityTypeId, itemId }) {
   await bitrix.call('crm.item.update', {
     entityTypeId: Number(entityTypeId),
@@ -181,14 +160,7 @@ async function createPaymentTaskIfMissing({ entityTypeId, itemId, itemTitle, dea
   // привязка задачи к CRM (надежнее вторым шагом)
   await bindTaskToCrm(newTaskId, crmBindings);
 
-  let checklist;
-  try {
-    checklist = await ensurePdfChecklist({ taskId: newTaskId, pdfNames: pdfs });
-  } catch (e) {
-    checklist = { ok: false, error: e?.message || String(e) };
-  }
-
-  return { ok: true, action: 'task_created', taskId: newTaskId, checklist };
+  return { ok: true, action: 'task_created', taskId: newTaskId };
 }
 
 async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
@@ -218,7 +190,6 @@ async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
 module.exports = {
   createPaymentTaskIfMissing,
   ensurePdfChecklist,
-  isAllPdfPaid,
   moveSpaToSuccess,
   findSpaByTaskId,
   syncPaidToSuccessByTask,

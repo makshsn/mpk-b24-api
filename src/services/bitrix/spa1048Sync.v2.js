@@ -206,7 +206,8 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   let checklist = { ok: false, action: 'skipped', reason: 'no_task' };
   if (activeTaskId && ensureChecklistForTask) {
     try {
-      checklist = await ensureChecklistForTask(activeTaskId);
+      const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
+      checklist = await ensureChecklistForTask(activeTaskId, pdfList);
     } catch (e) {
       checklist = { ok: false, action: 'error', error: e?.message || String(e) };
     }
@@ -229,6 +230,15 @@ async function syncSpa1048Item({ itemId, debug = false }) {
       pdfNames,
       responsibleId: Number(item.assignedById || item.ASSIGNED_BY_ID || accountantId),
     });
+
+    if (taskCreate?.taskId && ensureChecklistForTask) {
+      try {
+        const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
+        checklist = await ensureChecklistForTask(taskCreate.taskId, pdfList);
+      } catch (e) {
+        checklist = { ok: false, action: 'error', error: e?.message || String(e) };
+      }
+    }
   }
 
   return {
