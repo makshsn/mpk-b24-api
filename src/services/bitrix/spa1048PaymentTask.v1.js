@@ -1,5 +1,6 @@
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
+const checklistSync = require('./taskChecklistSync.v1');
 
 /**
  * Создаём задачу на оплату всех PDF + чеклист по именам PDF.
@@ -170,6 +171,24 @@ function isCompleteItem(it) {
 }
 
 async function ensurePdfChecklist({ taskId, pdfList }) {
+  if (checklistSync?.ensureChecklistForTask) {
+    const checklist = await checklistSync.ensureChecklistForTask(taskId, pdfList || []);
+    const items = Array.isArray(checklist?.items) ? checklist.items : await getChecklist(taskId);
+    const itemsWithMarker = items.filter((it) => {
+      const title = String(it?.TITLE || it?.title || '').trim();
+      return /\[(pdf|pdfname|file):/i.test(title);
+    });
+    const fullyComplete = itemsWithMarker.length > 0 && itemsWithMarker.every(isCompleteItem);
+    return {
+      ok: true,
+      ...checklist,
+      totalPdfItems: itemsWithMarker.length,
+      fullyComplete,
+      items,
+      itemsWithMarker,
+    };
+  }
+
   const normalizedPdfList = normalizePdfList(pdfList);
   const items = await getChecklist(taskId);
 
