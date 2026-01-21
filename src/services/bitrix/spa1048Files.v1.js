@@ -43,6 +43,46 @@ function uniqByName(files) {
   return out;
 }
 
+function buildPdfList({ afterFiles, pdfNames }) {
+  const byName = new Map();
+  const unnamed = [];
+  for (const f of afterFiles || []) {
+    const id = toNum(f?.id || f?.ID);
+    if (!id) continue;
+    const name = String(f?.name || f?.NAME || '').trim();
+    if (name) {
+      const key = name.toLowerCase();
+      if (!byName.has(key)) byName.set(key, { fileId: id, name });
+    } else {
+      unnamed.push({ fileId: id });
+    }
+  }
+
+  const usedUnnamed = new Set();
+  const out = [];
+  const seen = new Set();
+  for (const rawName of pdfNames || []) {
+    const name = String(rawName || '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let entry = byName.get(key);
+    if (!entry) {
+      const next = unnamed.find((u) => !usedUnnamed.has(u.fileId));
+      if (next) {
+        usedUnnamed.add(next.fileId);
+        entry = { fileId: next.fileId, name };
+      }
+    }
+
+    if (entry?.fileId) out.push({ fileId: entry.fileId, name });
+  }
+
+  return out;
+}
+
 /** ---- дедуп комментариев (чтобы не спамить) ---- */
 const COMMENT_TTL_SEC = Number(process.env.SPA1048_FILES_COMMENT_TTL_SEC || 600);
 const commentSeen = new Map();
@@ -396,6 +436,11 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
     const after = await getItemFiles({ entityTypeId, itemId, fieldUpper, fieldCamel });
     const afterIds = after.files.map(f => f.id);
 
+    const pdfNames = uploadList
+      .filter(x => String(x.name || '').toLowerCase().endsWith('.pdf'))
+      .map(x => x.name);
+    const pdfList = buildPdfList({ afterFiles: after.files, pdfNames });
+
     const res = {
       ok: true,
       action,
@@ -405,7 +450,8 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       afterCount: afterIds.length,
       zipDetected: zips.length > 0,
       extractedPdfCount,
-      pdfNames: uploadList.filter(x => String(x.name||'').toLowerCase().endsWith('.pdf')).map(x => x.name),
+      pdfNames,
+      pdfList,
       downloadErrors,
     };
 
