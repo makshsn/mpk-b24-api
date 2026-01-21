@@ -12,6 +12,7 @@ const checklistModule = fs.existsSync(checklistModulePath) ? require('./taskChec
 const ensureChecklistForTask = checklistModule?.ensureChecklistForTask;
 const getChecklistItems = checklistModule?.getChecklistItems;
 const isChecklistFullyCompleteExternal = checklistModule?.isChecklistFullyComplete;
+const getChecklistSummary = checklistModule?.getChecklistSummary;
 
 // ---- simple in-process lock to avoid double-create on burst webhooks ----
 const itemLocks = new Map();
