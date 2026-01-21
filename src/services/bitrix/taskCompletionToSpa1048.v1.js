@@ -60,55 +60,23 @@ function normalizeBindings(value) {
   return [value];
 }
 
-function parseBindingToken(token) {
-  const text = String(token || '').trim();
-  if (!text) return null;
-
-  const exactT = /^T(\d+)_(\d+)$/i.exec(text);
-  if (exactT) {
-    return { prefix: 'T', entityTypeId: parseNumber(exactT[1]), itemId: parseNumber(exactT[2]), raw: text };
-  }
-
-  const exactD = /^D[_:|-]?(\d+)[_:|-](\d+)$/i.exec(text);
-  if (exactD) {
-    return { prefix: 'D', entityTypeId: parseNumber(exactD[1]), itemId: parseNumber(exactD[2]), raw: text };
-  }
-
-  const exactL = /^L[_:|-]?(\d+)$/i.exec(text);
-  if (exactL) return { prefix: 'L', entityTypeId: null, itemId: parseNumber(exactL[1]), raw: text };
-  const exactC = /^C[_:|-]?(\d+)$/i.exec(text);
-  if (exactC) return { prefix: 'C', entityTypeId: null, itemId: parseNumber(exactC[1]), raw: text };
-  const exactCO = /^CO[_:|-]?(\d+)$/i.exec(text);
-  if (exactCO) return { prefix: 'CO', entityTypeId: null, itemId: parseNumber(exactCO[1]), raw: text };
-
-  return null;
-}
-
-function parseTaskCrmBindings(task) {
-  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
+function findSpaItemId(ufCrmTask, entityTypeId) {
   const bindings = normalizeBindings(ufCrmTask);
-  const parsed = [];
+  const re = /D(?:_|:|-)?(\d+)[_:|-](\d+)/gi;
 
   for (const raw of bindings) {
-    const token = parseBindingToken(raw);
-    if (token) parsed.push(token);
+    const text = String(raw || '').trim();
+    if (!text) continue;
+
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const typeId = parseNumber(match[1]);
+      const itemId = parseNumber(match[2]);
+      if (typeId === entityTypeId && itemId) {
+        return { itemId, raw: text };
+      }
+    }
   }
-
-  return { ufCrmTask, bindings, parsed };
-}
-
-function findSpaItemId(parsedBindings, entityTypeId) {
-  if (!parsedBindings?.length) return null;
-
-  const exact = parsedBindings.find(
-    (b) => b.prefix && b.prefix.toUpperCase() === 'T' && b.entityTypeId === entityTypeId && b.itemId,
-  );
-  if (exact) return { itemId: exact.itemId, raw: exact.raw, mode: 'exact_t' };
-
-  const exactD = parsedBindings.find(
-    (b) => b.prefix && b.prefix.toUpperCase() === 'D' && b.entityTypeId === entityTypeId && b.itemId,
-  );
-  if (exactD) return { itemId: exactD.itemId, raw: exactD.raw, mode: 'exact_d' };
 
   return null;
 }
@@ -120,7 +88,7 @@ function unwrapTaskGet(resp) {
 async function fetchTask(taskId) {
   const result = await bitrix.call('tasks.task.get', {
     taskId: Number(taskId),
-    select: ['*', 'UF_*'],
+    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE'],
   });
   return unwrapTaskGet(result);
 }
@@ -134,151 +102,80 @@ async function updateSpaStage({ itemId, stageId, entityTypeId }) {
 }
 
 async function handleTaskCompletionEvent(req, res) {
-  try {
-    ensureObjectBody(req);
+  ensureObjectBody(req);
 
-    if (req.method === 'POST') {
-      const tok = verifyOutboundToken(req, 'B24_OUTBOUND_TASK_TOKEN');
-      if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
-    }
-
-    const taskId = extractTaskId(req);
-    const statusAfter = extractStatusAfter(req);
-    const statusBefore = extractStatusBefore(req);
-    const debug = req.method === 'GET';
-
-    console.log('[task-event] incoming', {
-      taskId,
-      statusAfter,
-      statusBefore,
-      method: req.method,
-    });
-
-    if (!taskId) {
-      return res.json({ ok: true, action: 'skip_no_taskId', debug });
-    }
-
-    if (statusBefore === COMPLETED_STATUS) {
-      return res.json({ ok: true, action: 'skip_already_completed', taskId, statusBefore, statusAfter, debug });
-    }
-
-    if (statusAfter !== COMPLETED_STATUS) {
-      return res.json({ ok: true, action: 'skip_status', taskId, statusBefore, statusAfter, debug });
-    }
-
-    const task = await fetchTask(taskId);
-    if (!task) {
-      return res.status(500).json({ ok: false, action: 'error', error: 'task_not_found', taskId, debug });
-    }
-
-    const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
-    const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
-
-    const bindingsInfo = parseTaskCrmBindings(task);
-    const binding = findSpaItemId(bindingsInfo.parsed, entityTypeId);
-
-    console.log('[task-event] bindings', {
-      taskId,
-      ufCrmTask: bindingsInfo.ufCrmTask,
-      parsedBindings: bindingsInfo.parsed,
-      foundItemId: binding?.itemId || null,
-      foundMode: binding?.mode || null,
-    });
-
-    if (!binding?.itemId) {
-      const tBinding = bindingsInfo.parsed.find(
-        (item) => item.prefix && item.prefix.toUpperCase() === 'T' && item.itemId,
-      );
-      if (!tBinding?.itemId) {
-        return res.json({
-          ok: true,
-          action: 'skip_no_spa_binding',
-          taskId,
-          statusAfter,
-          debug,
-          bindings: bindingsInfo.parsed,
-        });
-      }
-
-      try {
-        const fallbackItem = await bitrix.call('crm.item.get', {
-          entityTypeId,
-          id: Number(tBinding.itemId),
-        });
-        const item = fallbackItem?.result?.item || fallbackItem?.item || null;
-        if (!item) {
-          return res.json({
-            ok: true,
-            action: 'skip_no_spa_binding',
-            taskId,
-            statusAfter,
-            debug,
-            bindings: bindingsInfo.parsed,
-            fallback: { used: true, reason: 'item_not_found', binding: tBinding },
-          });
-        }
-
-        const updateResult = await updateSpaStage({
-          itemId: tBinding.itemId,
-          stageId,
-          entityTypeId,
-        });
-
-        return res.json({
-          ok: true,
-          action: 'crm_item_update_success',
-          taskId,
-          itemId: tBinding.itemId,
-          statusAfter,
-          stageId,
-          debug,
-          bindings: bindingsInfo.parsed,
-          fallback: { used: true, binding: tBinding, updateResult },
-        });
-      } catch (fallbackError) {
-        return res.status(500).json({
-          ok: false,
-          action: 'error',
-          error: String(fallbackError?.message || fallbackError),
-          taskId,
-          debug,
-          bindings: bindingsInfo.parsed,
-          fallback: { used: true, binding: tBinding },
-        });
-      }
-    }
-
-    const updateResult = await updateSpaStage({
-      itemId: binding.itemId,
-      stageId,
-      entityTypeId,
-    });
-
-    console.log('[task-event] spa_stage_updated', {
-      taskId,
-      itemId: binding.itemId,
-      stageId,
-      updateResult,
-    });
-
-    return res.json({
-      ok: true,
-      action: 'spa_stage_updated',
-      taskId,
-      itemId: binding.itemId,
-      statusAfter,
-      stageId,
-      debug,
-      binding,
-      bindings: bindingsInfo.parsed,
-    });
-  } catch (error) {
-    return res.status(500).json({
-      ok: false,
-      action: 'error',
-      error: String(error?.message || error),
-    });
+  if (req.method === 'POST') {
+    const tok = verifyOutboundToken(req, 'B24_OUTBOUND_TASK_TOKEN');
+    if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
   }
+
+  const taskId = extractTaskId(req);
+  const statusAfter = extractStatusAfter(req);
+  const statusBefore = extractStatusBefore(req);
+  const debug = req.method === 'GET';
+
+  console.log('[task-event] incoming', {
+    taskId,
+    statusAfter,
+    statusBefore,
+    method: req.method,
+  });
+
+  if (!taskId) {
+    return res.json({ ok: true, action: 'skip_no_taskId', debug });
+  }
+
+  if (statusBefore === COMPLETED_STATUS) {
+    return res.json({ ok: true, action: 'skip_already_completed', taskId, statusBefore, statusAfter, debug });
+  }
+
+  if (statusAfter !== COMPLETED_STATUS) {
+    return res.json({ ok: true, action: 'skip_status', taskId, statusBefore, statusAfter, debug });
+  }
+
+  const task = await fetchTask(taskId);
+  if (!task) {
+    return res.status(500).json({ ok: false, error: 'task_not_found', taskId, debug });
+  }
+
+  const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
+  const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
+
+  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
+  const binding = findSpaItemId(ufCrmTask, entityTypeId);
+
+  console.log('[task-event] bindings', {
+    taskId,
+    ufCrmTask,
+    foundItemId: binding?.itemId || null,
+  });
+
+  if (!binding?.itemId) {
+    return res.json({ ok: true, action: 'skip_no_spa_binding', taskId, statusAfter, debug });
+  }
+
+  const updateResult = await updateSpaStage({
+    itemId: binding.itemId,
+    stageId,
+    entityTypeId,
+  });
+
+  console.log('[task-event] spa_stage_updated', {
+    taskId,
+    itemId: binding.itemId,
+    stageId,
+    updateResult,
+  });
+
+  return res.json({
+    ok: true,
+    action: 'spa_stage_updated',
+    taskId,
+    itemId: binding.itemId,
+    statusAfter,
+    stageId,
+    debug,
+  });
 }
 
-module.exports = { handleTaskCompletionEvent, parseTaskCrmBindings };
+module.exports = { handleTaskCompletionEvent };
