@@ -1,5 +1,5 @@
-[dotenv@17.2.3] injecting env (32) from .env -- tip: ⚙️  suppress all logs with { quiet: true }
-PAUSE=UC_79QMBF count=88
+[dotenv@17.2.3] injecting env (33) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
+PAUSE=UC_79QMBF count=80
 206
 214
 222
@@ -58,11 +58,9 @@ PAUSE=UC_79QMBF count=88
 1340
 1354
 1390
-1414
 1418
 1422
 1430
-1458
 1470
 1488
 1510
@@ -71,20 +69,14 @@ PAUSE=UC_79QMBF count=88
 1566
 1580
 1586
-1594
-1604
-1682
 1684
 1698
-1706
-1714
-1716
 1726
 1730
 1744
 1750
 1752
-1754
 1760
 1764
 1792
+1842
