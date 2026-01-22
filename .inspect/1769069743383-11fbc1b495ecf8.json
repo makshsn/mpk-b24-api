@@ -1,0 +1,21 @@
+{
+  "id": "1769069743383-11fbc1b495ecf8",
+  "ts": "2026-01-22T08:15:43.383Z",
+  "method": "POST",
+  "url": "/b24/_inspect/in",
+  "path": "/_inspect/in",
+  "headers": {
+    "host": "mpk-b24-webhooks.online",
+    "x-real-ip": "64.188.82.144",
+    "x-forwarded-for": "64.188.82.144",
+    "x-forwarded-proto": "https",
+    "connection": "close",
+    "content-length": "75",
+    "user-agent": "curl/8.5.0",
+    "accept": "*/*",
+    "content-type": "application/x-www-form-urlencoded"
+  },
+  "query": {},
+  "contentType": "application/x-www-form-urlencoded",
+  "ip": "64.188.82.144"
+}

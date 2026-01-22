@@ -1,0 +1,44 @@
+{
+  "id": "1769072438018-b88025ba014f68",
+  "ts": "2026-01-22T09:00:38.018Z",
+  "method": "POST",
+  "url": "/b24/_inspect/in",
+  "path": "/_inspect/in",
+  "headers": {
+    "host": "mpk-b24-webhooks.online",
+    "x-real-ip": "89.208.230.2",
+    "x-forwarded-for": "89.208.230.2",
+    "x-forwarded-proto": "https",
+    "connection": "close",
+    "content-length": "580",
+    "user-agent": "Bitrix24 Webhook Engine",
+    "content-type": "application/x-www-form-urlencoded",
+    "accept-encoding": "gzip"
+  },
+  "query": {},
+  "body": {
+    "event": "ONTASKCOMMENTADD",
+    "event_handler_id": "404",
+    "data": {
+      "FIELDS_BEFORE": "undefined",
+      "FIELDS_AFTER": {
+        "ID": "0",
+        "MESSAGE_ID": "48766",
+        "TASK_ID": "2260"
+      },
+      "IS_ACCESSIBLE_BEFORE": "N",
+      "IS_ACCESSIBLE_AFTER": "undefined"
+    },
+    "ts": "1769072436",
+    "auth": {
+      "domain": "b24-mg3u3i.bitrix24.ru",
+      "client_endpoint": "https://b24-mg3u3i.bitrix24.ru/rest/",
+      "server_endpoint": "https://oauth.bitrix24.tech/rest/",
+      "member_id": "c7848c26da9f20fa0d54043bf464b60c",
+      "application_token": "yp5j69lbdodv8vx138ok4kjay8kp19aj"
+    }
+  },
+  "rawBody": "event=ONTASKCOMMENTADD&event_handler_id=404&data%5BFIELDS_BEFORE%5D=undefined&data%5BFIELDS_AFTER%5D%5BID%5D=0&data%5BFIELDS_AFTER%5D%5BMESSAGE_ID%5D=48766&data%5BFIELDS_AFTER%5D%5BTASK_ID%5D=2260&data%5BIS_ACCESSIBLE_BEFORE%5D=N&data%5BIS_ACCESSIBLE_AFTER%5D=undefined&ts=1769072436&auth%5Bdomain%5D=b24-mg3u3i.bitrix24.ru&auth%5Bclient_endpoint%5D=https%3A%2F%2Fb24-mg3u3i.bitrix24.ru%2Frest%2F&auth%5Bserver_endpoint%5D=https%3A%2F%2Foauth.bitrix24.tech%2Frest%2F&auth%5Bmember_id%5D=c7848c26da9f20fa0d54043bf464b60c&auth%5Bapplication_token%5D=yp5j69lbdodv8vx138ok4kjay8kp19aj",
+  "contentType": "application/x-www-form-urlencoded",
+  "ip": "89.208.230.2"
+}

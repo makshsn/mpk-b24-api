@@ -5,6 +5,8 @@ const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.cont
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
 
 const router = express.Router();
+
+// _inspect routes (must be BEFORE debug middleware)
 const inspectRoutes = require('./inspect.routes');
 router.use(inspectRoutes);
 
@@ -35,6 +37,5 @@ router.get('/task-event', taskCompletionEvent);
 
 router.post('/task-update', taskUpdateWebhook);
 router.get('/task-update', taskUpdateWebhook); // удобно для ручного теста
-
 
 module.exports = router;

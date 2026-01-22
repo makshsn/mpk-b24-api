@@ -5,25 +5,33 @@ const bitrixRoutes = require('./routes/bitrix.routes');
 const publicRoutes = require('./routes/public.routes');
 
 const app = express();
-// RAW body collector (для инспектора вебхуков)
-app.use((req, res, next) => {
-    const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => {
-      req.rawBody = Buffer.concat(chunks);
-      next();
-    });
-  });
-  
 
-
-app.use(express.json({ limit: "25mb" }));
-app.use(express.urlencoded({ extended: true }));
 // если у тебя есть nginx — можно оставить, не мешает
 app.set('trust proxy', 1);
 
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true }));
+// --- rawBody capture (чтобы видеть, что реально прилетело) ---
+function rawBodySaver(req, _res, buf, encoding) {
+  try {
+    if (buf && buf.length) {
+      req.rawBody = buf.toString(encoding || 'utf8');
+    }
+  } catch (e) {
+    req.rawBody = null;
+  }
+}
+
+// ОДИН раз подключаем парсеры (и не режем тело внезапно до 1mb)
+app.use(express.json({
+  limit: '25mb',
+  verify: rawBodySaver,
+}));
+
+app.use(express.urlencoded({
+  extended: true,
+  limit: '25mb',
+  verify: rawBodySaver,
+}));
+
 app.use(httpLogger);
 
 app.use('/b24', publicRoutes);
@@ -34,6 +42,5 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/api/v1/bitrix', bitrixRoutes);
 
 app.use(errorHandler);
-
 
 module.exports = app;
