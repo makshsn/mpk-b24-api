@@ -1,4 +1,4 @@
-const { handleTaskUpdateWebhook } = require('../services/bitrix/spa1048TaskOnUpdate.v1');
+const { handleTaskUpdateWebhook } = require('../modules/spa1048/spa1048TaskOnUpdate.v1');
 
 async function taskUpdateWebhook(req, res) {
   try {

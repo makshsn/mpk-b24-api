@@ -1,8 +1,8 @@
 'use strict';
 
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
-const { ensureObjectBody, verifyOutboundToken, extractTaskIdDetailed } = require('./b24Outbound.v1');
+const { ensureObjectBody, verifyOutboundToken, extractTaskIdDetailed } = require('../../services/bitrix/b24Outbound.v1');
 
 const COMPLETED_STATUS = 5;
 

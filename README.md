@@ -1,122 +1,114 @@
-# Bitrix24 outbound webhooks: формат payload для событий задач
+# mpk-b24-api
 
-Ниже — реальный формат, в котором Bitrix24 шлёт **исходящий вебхук** (Outgoing webhook) на наш сервер.  
-Важно: Bitrix чаще всего отправляет `Content-Type: application/x-www-form-urlencoded`, то есть тело — **urlencoded**, а в Express оно превращается в вложенный объект через `express.urlencoded({ extended: true })`.
+Сервис интеграции с Bitrix24 для обработки веб‑хуков, синхронизации сущностей и фоновых задач.  
+Основной фокус — автоматизация работы с лидами и смарт‑процессом SPA‑1048: создание контактов, обновление полей лида, синхронизация задач и дедлайнов, обработка входящих событий и периодические фоновые проверки.
 
-## Куда слать для отладки
+## Назначение проекта
 
-Для проверки «что реально прилетает» используется инспектор:
+- **Обработка веб‑хуков Bitrix24** (`/b24/*`) с защитой по токену, логированием и диагностикой.
+- **API для внутренних задач** (`/api/v1/bitrix/*`) — вспомогательные операции по лидам и синхронизации.
+- **SPA‑1048**: синхронизация задач и дедлайнов, перенос в “Срочно к оплате”, автоматические действия по чек‑листам.
+- **Фоновые задачи**: периодический пересмотр срочных оплат и статусов задач.
 
-- Endpoint: `POST /b24/_inspect/in`
-- Получить последнее: `GET /b24/_inspect/last`
-- Список: `GET /b24/_inspect/list?n=10`
-- По id: `GET /b24/_inspect/get/<ID>`
+## Структура директорий (после рефакторинга)
 
-Пример:
+```
+src/
+  app.js                     # Точка входа приложения (Express)
+  server.js                  # Запуск HTTP‑сервера
+  routes/                    # Маршруты API и публичных веб‑хуков
+  controllers/               # Контроллеры (тонкий слой над сервисами)
+  services/bitrix/           # Клиент Bitrix24 + бизнес‑сервисы для лидов/заказов
+  modules/spa1048/           # Модули SPA‑1048 (синхронизация, задачи, файлы)
+  config/                    # Конфигурация и env‑настройки
+  jobs/                      # Фоновые периодические задачи (PM2/cron)
+  workers/                   # Долгоживущие воркеры
+  middlewares/               # Middleware
+  utils/                     # Утилиты
+```
+
+## Основные эндпоинты
+
+### Публичные веб‑хуки
+
+Базовый путь: **`/b24`**
+
+- `POST /b24/spa-event` — входящие события SPA‑1048.
+- `POST /b24/task-event` — события задач для SPA‑1048.
+- `POST /b24/task-update` — обновления задач (webhook).
+
+### Внутреннее API
+
+Базовый путь: **`/api/v1/bitrix`**
+
+- `GET|POST /api/v1/bitrix/leads/:leadId/create-contact-by-phone`  
+  Создаёт контакт из лида по телефону.
+- `GET|POST /api/v1/bitrix/leads/:leadId/set-current-order-no`  
+  Обновляет номер текущего заказа.
+- `GET|POST /api/v1/bitrix/leads/:leadId/move-current-to-closed`  
+  Переносит из “Текущие” в “Закрытые”.
+- `GET|POST /api/v1/bitrix/leads/pause-sync`  
+  Пакетная синхронизация “Пауза” (только localhost).
+- `GET|POST /api/v1/bitrix/leads/:leadId/pause-sync`  
+  Точечная синхронизация “Пауза” (только localhost).
+- `GET|POST /api/v1/bitrix/events/task-update`  
+  Входящие события по задачам (fallback).
+
+## Переменные окружения
+
+Минимально необходимые:
+
+- `PORT` — порт сервера (по умолчанию 3000).
+- `BITRIX_WEBHOOK_BASE` — базовый URL Bitrix REST, например `https://example.bitrix24.ru/rest/<user>/<token>`.
+- `WEBHOOK_TOKEN` — токен для внутренних веб‑хуков.
+
+Дополнительные (SPA‑1048):
+
+- `SPA1048_ENTITY_TYPE_ID`
+- `SPA1048_ACCOUNTANT_ID`
+- `SPA1048_STAGE_ACTIVE`
+- `SPA1048_STAGE_FINAL`
+- `SPA1048_STAGE_PAID`
+- `SPA1048_TASK_ID_FIELD_ORIG`
+- `SPA1048_URGENT_STAGE_NAME`
+- `SPA1048_URGENT_STAGE_ID`
+- `SPA1048_URGENT_DAYS`
+- `SPA1048_URGENT_INTERVAL_HOURS`
+- `B24_TASK_OUT_TOKEN`
+- `B24_OUTBOUND_SPA_TOKEN`
+
+> Полный список переменных уточняйте в `src/config` и модулях `src/modules/spa1048`.
+
+## Запуск проекта
 
 ```bash
-curl -sS "https://mpk-b24-webhooks.online/b24/_inspect/last"   | jq '.item.method, .item.path, .item.body, .item.rawBody'
+npm install
+npm run dev
 ```
 
-## Пример реального payload (ONTASKCOMMENTADD)
+### Продакшен‑запуск
 
-Это пример события **добавления комментария** в задачу. Обрати внимание:  
-- `data.FIELDS_AFTER.ID` может быть **0** (это не taskId)  
-- реальный ID задачи находится в `data.FIELDS_AFTER.TASK_ID`
-
-### То, как это выглядит после парсинга Express (body)
-
-```json
-{
-  "event": "ONTASKCOMMENTADD",
-  "event_handler_id": "404",
-  "data": {
-    "FIELDS_BEFORE": "undefined",
-    "FIELDS_AFTER": {
-      "ID": "0",
-      "MESSAGE_ID": "48760",
-      "TASK_ID": "2536"
-    },
-    "IS_ACCESSIBLE_BEFORE": "N",
-    "IS_ACCESSIBLE_AFTER": "undefined"
-  },
-  "ts": "1769071218",
-  "auth": {
-    "domain": "b24-mg3u3i.bitrix24.ru",
-    "client_endpoint": "https://b24-mg3u3i.bitrix24.ru/rest/",
-    "server_endpoint": "https://oauth.bitrix24.tech/rest/",
-    "member_id": "c7848c26da9f20fa0d54043bf464b60c",
-    "application_token": "yp5j69lbdodv8vx138ok4kjay8kp19aj"
-  }
-}
+```bash
+npm run start
 ```
 
-### То, как это приходит «сырым» (rawBody, urlencoded)
+## Удалённые устаревшие файлы
 
-```text
-event=ONTASKCOMMENTADD&
-event_handler_id=404&
-data[FIELDS_BEFORE]=undefined&
-data[FIELDS_AFTER][ID]=0&
-data[FIELDS_AFTER][MESSAGE_ID]=48760&
-data[FIELDS_AFTER][TASK_ID]=2536&
-data[IS_ACCESSIBLE_BEFORE]=N&
-data[IS_ACCESSIBLE_AFTER]=undefined&
-ts=1769071218&
-auth[domain]=b24-mg3u3i.bitrix24.ru&
-auth[client_endpoint]=https%3A%2F%2Fb24-mg3u3i.bitrix24.ru%2Frest%2F&
-auth[server_endpoint]=https%3A%2F%2Foauth.bitrix24.tech%2Frest%2F&
-auth[member_id]=c7848c26da9f20fa0d54043bf464b60c&
-auth[application_token]=yp5j69lbdodv8vx138ok4kjay8kp19aj
-```
+В рамках безопасного рефакторинга удалены неиспользуемые и дублирующие модули:
 
-## Что важно для логики «слежения за задачами»
+- `src/services/bitrix/spa1048Sync.js`
+- `src/services/bitrix/spa1048TaskDeadlineSync.js`
+- `src/services/bitrix/spa1048TaskOutbound.v1.js`
+- `src/services/bitrix/task1048Sync.v2.js`
+- `src/services/bitrix/crmFileField.js`
+- `src/controllers/task.controller.js`
+- `src/controllers/spa1048Task.controller.js`
+- `src/controllers/spa1048TaskEvent.controller.js`
+- `src/modules/spa1048/config.js`
+- `src/modules/spa1048/service.js`
 
-### 1) Где искать ID задачи (taskId)
+## Архитектура и расширяемость
 
-В зависимости от `event` taskId может быть в разных местах. Для `ONTASKCOMMENTADD` — это:
-
-- `body.data.FIELDS_AFTER.TASK_ID` ✅ (самое важное)
-- иногда `body.data.FIELDS_AFTER.ID` — **НЕ taskId** (может быть `0`)
-
-Поэтому извлечение taskId должно проверять **оба пути**, начиная с `TASK_ID`.
-
-Рекомендуемый порядок поиска:
-
-1. `data.FIELDS_AFTER.TASK_ID`
-2. `data.FIELDS_BEFORE.TASK_ID`
-3. `data.FIELDS_AFTER.ID` (только если похоже на taskId и > 0)
-4. `data.FIELDS_BEFORE.ID` (только если > 0)
-5. fallback: глубокий поиск по ключам `TASK_ID`, `task_id`, `ID`, `id`
-
-### 2) Где искать статус (completed / STATUS=5)
-
-Для событий типа `ONTASKUPDATE` Bitrix обычно шлёт изменения в `data[FIELDS_AFTER][STATUS]`.  
-Поэтому логика должна уметь извлекать:
-
-- `data.FIELDS_AFTER.STATUS`
-- `data.FIELDS_BEFORE.STATUS` (если нужно сравнение)
-
-И только при `STATUS=5` выполнять перенос SPA в `DT1048_14:SUCCESS`.
-
-### 3) Токен (application_token)
-
-Bitrix передаёт `auth.application_token` (см. пример выше).  
-Проверка токена — опциональна: можно включать/выключать через переменную окружения, чтобы не блокировать отладку.
-
-## Подсказка для Codex: рефактор «слежения за задачами»
-
-Задача рефактора:
-
-- сделать единый модуль `extractTaskContext(req)` который возвращает:
-  - `event`
-  - `taskId`
-  - `statusAfter` / `statusBefore`
-  - `raw` (кусок payload для логов)
-- учесть, что:
-  - payload может быть `application/x-www-form-urlencoded`
-  - `TASK_ID` может лежать в `FIELDS_AFTER`, а `ID` там может быть `0`
-- покрыть unit-тестами 2–3 реальных примера payload:
-  - `ONTASKCOMMENTADD` (TASK_ID)
-  - `ONTASKUPDATE` (ID + STATUS)
-  - пустой GET (если где-то остался)
+- Логика SPA‑1048 сосредоточена в `src/modules/spa1048`, что упрощает добавление новых сценариев без изменений в API‑слое.
+- Контроллеры остаются тонкими — принимают запрос, валидируют и проксируют в сервисы.
+- Внутренние сервисы Bitrix вынесены в `src/services/bitrix` и могут переиспользоваться между задачами.

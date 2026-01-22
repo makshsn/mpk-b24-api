@@ -5,7 +5,7 @@ const os = require('os');
 const axios = require('axios');
 const unzipper = require('unzipper');
 
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
 
 function nowIso() { return new Date().toISOString(); }

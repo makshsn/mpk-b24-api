@@ -1,5 +1,5 @@
 const qs = require('querystring');
-const { handleSpaEvent } = require('../services/bitrix/spa1048Sync.v2');
+const { handleSpaEvent } = require('../modules/spa1048/spa1048Sync.v2');
 const { verifyOutboundToken } = require('../services/bitrix/b24Outbound.v1');
 
 function parseQueryFromUrl(req) {
