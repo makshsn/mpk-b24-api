@@ -137,10 +137,24 @@ async function runUrgentToPayOnce(options = {}) {
 
   // В crm.item.list поля приходят в camelCase (как и в crm.item.get),
   // поэтому для UF_* берём именно camel ключ.
-  const deadlineKey = ufToCamel(cfg.deadlineField || 'UF_CRM_8_1768219591855') || 'ufCrm8_1768219591855';
+  // Приоритет: options/env -> cfg -> дефолт.
+  const deadlineFieldOrig =
+    options.deadlineField ||
+    process.env.SPA1048_DEADLINE_FIELD ||
+    cfg.deadlineField ||
+    'UF_CRM_8_1768219591855';
+  const deadlineKey = ufToCamel(deadlineFieldOrig) || 'ufCrm8_1768219591855';
 
   // Дата оплаты: если заполнено — счёт не трогаем
-  const payDateKey = ufToCamel(cfg.paymentDateField || 'UF_CRM_8_1768219659763') || 'ufCrm8_1768219659763';
+  // Важно: в конфиге поле называется paidAtField, но в разных местах ранее встречалось paymentDateField.
+  // Здесь поддерживаем оба варианта, чтобы не ломать совместимость.
+  const paidAtFieldOrig =
+    options.paidAtField ||
+    process.env.SPA1048_PAID_AT_FIELD ||
+    cfg.paidAtField ||
+    cfg.paymentDateField ||
+    'UF_CRM_8_1768219659763';
+  const payDateKey = ufToCamel(paidAtFieldOrig) || 'ufCrm8_1768219659763';
 
   const select = ['id', 'title', 'stageId', deadlineKey, payDateKey];
   const summary = {
@@ -160,7 +174,6 @@ async function runUrgentToPayOnce(options = {}) {
     // Стадия 'успешно оплачено' — никогда не тащим обратно в срочные
     const paidStageId = String(cfg.stagePaid || process.env.SPA1048_STAGE_PAID || '').trim();
 
-
     if (!urgentStageId) {
       summary.categories[categoryId] = { ok: false, error: `urgent stage not found by name="${urgentName}"` };
       continue;
@@ -173,7 +186,6 @@ async function runUrgentToPayOnce(options = {}) {
     // Сканируем только процессные стадии, но исключаем paidStageId (если он почему-то тоже SEMANTICS=P)
     const stageIdsToScan = paidStageId ? processStageIds.filter(id => id !== paidStageId) : processStageIds;
 
-
     const items = await listSpaItems(entityTypeId, categoryId, stageIdsToScan, select);
     summary.scannedTotal += items.length;
 
@@ -185,12 +197,21 @@ async function runUrgentToPayOnce(options = {}) {
       if (paidStageId && currentStage === paidStageId) continue;
 
       // Если дата оплаты заполнена — это уже оплачено, не дёргаем
-      const paidAt = it?.[payDateKey] || null;
+      const paidAt =
+        it?.[payDateKey] ??
+        it?.[paidAtFieldOrig] ??
+        it?.[ufToCamel(paidAtFieldOrig)] ??
+        null;
       if (paidAt) continue;
 
       if (currentStage === urgentStageId) continue;
 
-      const dlYmd = dateOnly(it?.[deadlineKey] || it?.[cfg.deadlineField] || null);
+      const dlYmd = dateOnly(
+        it?.[deadlineKey] ??
+        it?.[deadlineFieldOrig] ??
+        it?.[ufToCamel(deadlineFieldOrig)] ??
+        null
+      );
       if (!dlYmd) continue;
 
       const left = daysLeft(dlYmd);

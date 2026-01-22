@@ -86,9 +86,7 @@ function normalizePdfList(pdfList) {
     }
     name = String(name || '').trim();
     if (!name) continue;
-    // В реальности имя может временно приходить без расширения.
-    // Мы не фильтруем строго по ".pdf", иначе новые пункты могут не попасть в чеклист.
-    if (name.toLowerCase().endsWith('.zip')) continue;
+    if (!name.toLowerCase().endsWith('.pdf')) continue;
 
     const key = normalizeTitle(name);
     if (!key || seen.has(key)) continue;
@@ -120,6 +118,30 @@ async function addChecklistItem(taskId, title, parentId = 0) {
   }, { ctx: { taskId: Number(taskId), step: 'checklist_add', parentId: Number(parentId) || 0 } });
 
   return { id: unwrapChecklistAddId(r), raw: r };
+}
+
+async function deleteChecklistItem(taskId, itemId) {
+  const tid = Number(taskId);
+  const iid = Number(itemId);
+  if (!tid || !iid) return { ok: false, action: 'invalid_delete_params', taskId: tid, itemId: iid };
+
+  // Docs: task.checklistitem.delete expects TASKID + ITEMID and parameter order matters.
+  // Some endpoints accept ID instead of ITEMID; keep a fallback.
+  try {
+    const r = await bitrix.call('task.checklistitem.delete', {
+      TASKID: tid,
+      ITEMID: iid,
+    }, { ctx: { taskId: tid, step: 'checklist_delete', itemId: iid } });
+    return { ok: true, raw: r };
+  } catch (e) {
+    const msg = String(e?.message || e || '');
+    // Fallback for older/alternate param name.
+    const r2 = await bitrix.call('task.checklistitem.delete', {
+      TASKID: tid,
+      ID: iid,
+    }, { ctx: { taskId: tid, step: 'checklist_delete_fallback', itemId: iid, err: msg.slice(0, 200) } });
+    return { ok: true, raw: r2, fallback: true };
+  }
 }
 
 // ===== locking (межпроцессный, чтобы не плодить root при бурсте) =====
@@ -188,11 +210,11 @@ async function getChecklistSummary(taskId) {
 }
 
 /**
- * Создаёт (или дополняет) чеклист "PDF-файлы" так, чтобы в нём
- * присутствовали ВСЕ PDF по названиям. Дубликаты по названию не добавляет.
- *
- * Важно: ничего не удаляет. Если пунктов уже больше — всё равно добавляем
- * недостающие названия (если каких‑то PDF ещё нет в чеклисте).
+ * Строгая синхронизация чеклиста "PDF-файлы" с PDF-списком:
+ * - если PDF стало меньше — лишние пункты удаляются
+ * - если PDF стало больше — недостающие пункты добавляются
+ * - если существуют дубли root-чеклистов с таким названием — удаляем лишние, оставляя один
+ * - дубликаты пунктов (одинаковый TITLE) схлопываются до одного
  */
 async function ensureChecklistForTask(taskId, pdfList = []) {
   const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
@@ -202,9 +224,6 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
   const desiredCount = desired.length;
 
   if (!toNum(taskId)) return { ok: false, action: 'invalid_taskId' };
-  if (!desiredCount) {
-    return { ok: true, action: 'skip_no_pdf', enabled: true, desiredCount: 0, listTitle };
-  }
 
   return await withProcessFileLock(taskId, async () => {
     // 1) читаем все пункты
@@ -236,7 +255,69 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       };
     }
 
-    // 3) если нет root — создаём один раз
+    // 3) если PDF нет — удаляем весь наш чеклист (строгая синхронизация)
+    //    (и его дубли, если они были)
+    if (!desiredCount) {
+      if (!rootId && rootsFound === 0) {
+        return {
+          ok: true,
+          action: 'in_sync_no_pdf',
+          enabled: true,
+          taskId: Number(taskId),
+          listTitle,
+          desiredCount: 0,
+          pdfFound: 0,
+          rootsFound,
+          rootsDeleted: 0,
+          itemsDeleted: 0,
+        };
+      }
+
+      if (!rootId && rootsFound > 0) {
+        return {
+          ok: true,
+          action: 'skip_root_exists_but_id_unparsed',
+          enabled: true,
+          taskId: Number(taskId),
+          listTitle,
+          desiredCount: 0,
+          pdfFound: 0,
+          rootsFound,
+          rootId: 0,
+        };
+      }
+
+      let itemsDeleted = 0;
+      let rootsDeleted = 0;
+      const rootsToDelete = rootIds.length ? rootIds : (rootId ? [rootId] : []);
+
+      for (const rid of rootsToDelete) {
+        const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rid));
+        for (const ch of children) {
+          const cid = toNum(getField(ch, 'ID'));
+          if (!cid) continue;
+          await deleteChecklistItem(taskId, cid);
+          itemsDeleted++;
+        }
+        await deleteChecklistItem(taskId, rid);
+        rootsDeleted++;
+      }
+
+      return {
+        ok: true,
+        action: 'deleted_all_no_pdf',
+        enabled: true,
+        taskId: Number(taskId),
+        listTitle,
+        desiredCount: 0,
+        pdfFound: 0,
+        rootsFound,
+        rootsDeleted,
+        itemsDeleted,
+      };
+    }
+
+    // 4) если нет root — создаём один раз
     let rootCreated = false;
     if (!rootId) {
       const created = await addChecklistItem(taskId, listTitle, 0);
@@ -266,68 +347,98 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       };
     }
 
-    // 4) дети под root
+    // 5) удаляем дубли root-чеклистов, если они есть
+    let rootsDeleted = 0;
+    let duplicateRoots = 0;
+    if (rootIds.length > 1) {
+      duplicateRoots = rootIds.length - 1;
+      const toDeleteRoots = rootIds.filter((id) => id !== rootId);
+      for (const rid of toDeleteRoots) {
+        const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rid));
+        for (const ch of children) {
+          const cid = toNum(getField(ch, 'ID'));
+          if (!cid) continue;
+          await deleteChecklistItem(taskId, cid);
+        }
+        await deleteChecklistItem(taskId, rid);
+        rootsDeleted++;
+      }
+      // перечитываем после чистки
+      all = await getChecklistItems(taskId);
+    }
+
+    // 6) дети под canonical root
     const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
     const existingCount = children.length;
 
-    const existingTitles = new Set(
-      children
-        .map((it) => normalizeTitle(getField(it, 'TITLE') || ''))
-        .filter(Boolean)
-    );
+    const desiredKeys = new Set(desired.map((x) => x.key).filter(Boolean));
 
-    // Быстрый критерий "не трогаем": если кол-во файлов == кол-ву пунктов
-    // И при этом ВСЕ нужные названия уже присутствуют.
-    const desiredKeys = desired.map((d) => d.key).filter(Boolean);
-    const allDesiredPresent = desiredKeys.every((k) => existingTitles.has(k));
-    if (existingCount === desiredCount && allDesiredPresent) {
-      return {
-        ok: true,
-        action: 'skip_already_in_sync',
-        enabled: true,
-        taskId: Number(taskId),
-        listTitle,
-        desiredCount,
-        pdfFound: desiredCount,
-        existingCount,
-        added: 0,
-        skippedExisting: desiredCount,
-        rootId,
-        rootCreated,
-        rootsFound,
-        duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
-        items: children,
-        summary: { total: existingCount, done: children.filter(isDone).length, isAllDone: isChecklistFullyComplete(children) },
-      };
+    // группируем существующие по title
+    const byKey = new Map();
+    for (const ch of children) {
+      const id = toNum(getField(ch, 'ID'));
+      const title = String(getField(ch, 'TITLE') || '').trim();
+      const key = normalizeTitle(title);
+      if (!id || !key) continue;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ id, title, raw: ch });
     }
+
+    // определяем, что удалять:
+    // - всё, чего нет в desired
+    // - дубликаты (если 2+ одинаковых ключа)
+    const idsToDelete = [];
+    for (const [key, list] of byKey.entries()) {
+      const sorted = list.sort((a, b) => a.id - b.id);
+      if (!desiredKeys.has(key)) {
+        // удаляем все
+        for (const it of sorted) idsToDelete.push(it.id);
+        continue;
+      }
+      // desired содержит этот ключ — оставляем один, удаляем остальные
+      if (sorted.length > 1) {
+        for (const it of sorted.slice(1)) idsToDelete.push(it.id);
+      }
+    }
+
+    let deleted = 0;
+    for (const id of idsToDelete) {
+      await deleteChecklistItem(taskId, id);
+      deleted++;
+    }
+
+    // перечитываем после удаления (важно для корректного добавления)
+    const allAfterDelete = deleted ? await getChecklistItems(taskId) : all;
+    const childrenAfterDelete = allAfterDelete.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+    const existingAfterDeleteKeys = new Set(childrenAfterDelete.map((it) => normalizeTitle(getField(it, 'TITLE') || '')).filter(Boolean));
 
     let added = 0;
     let skippedExisting = 0;
-
-    // Главное правило: добавляем ВСЕ отсутствующие названия PDF,
-    // даже если в чеклисте уже больше пунктов (могли остаться старые/ручные).
     for (const it of desired) {
       const title = String(it.name || '').trim();
       const key = it.key || normalizeTitle(title);
       if (!key) continue;
-
-      if (existingTitles.has(key)) {
+      if (existingAfterDeleteKeys.has(key)) {
         skippedExisting++;
         continue;
       }
-
       await addChecklistItem(taskId, title, rootId);
-      existingTitles.add(key);
+      existingAfterDeleteKeys.add(key);
       added++;
     }
 
-    // Перечитываем итоговые пункты (для summary и чтобы spa-event мог оценить completion)
-    const allAfter = await getChecklistItems(taskId);
-    const childrenAfter = allAfter.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+    // итоговое состояние
+    const allFinal = (deleted || added || rootsDeleted) ? await getChecklistItems(taskId) : allAfterDelete;
+    const childrenFinal = allFinal.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+    const finalKeys = childrenFinal.map((it) => normalizeTitle(getField(it, 'TITLE') || '')).filter(Boolean);
+    const finalKeySet = new Set(finalKeys);
+    const inSync = childrenFinal.length === desiredCount && finalKeySet.size === desiredCount && [...desiredKeys].every((k) => finalKeySet.has(k));
+
+    const action = (deleted || added || rootsDeleted) ? 'synced_strict' : 'in_sync_strict';
 
     return {
       ok: true,
-      action: added > 0 ? 'added_missing_items' : 'skip_already_in_sync_titles',
+      action: inSync ? action : 'synced_strict_mismatch',
       enabled: true,
       taskId: Number(taskId),
       listTitle,
@@ -335,13 +446,15 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       pdfFound: desiredCount,
       existingCount,
       added,
+      deleted,
       skippedExisting,
       rootId,
       rootCreated,
       rootsFound,
-      duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
-      items: childrenAfter,
-      summary: { total: childrenAfter.length, done: childrenAfter.filter(isDone).length, isAllDone: isChecklistFullyComplete(childrenAfter) },
+      rootsDeleted,
+      duplicatesRoots: duplicateRoots,
+      items: childrenFinal,
+      summary: { total: childrenFinal.length, done: childrenFinal.filter(isDone).length, isAllDone: isChecklistFullyComplete(childrenFinal) },
     };
   });
 }
