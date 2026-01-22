@@ -405,7 +405,11 @@ function buildPaymentTaskTitle({ pdfCount, itemTitle, itemId }) {
 }
 
 function buildPaymentTaskDescription({ itemId, pdfNames }) {
-  const pdfs = uniq(pdfNames).filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
+  const pdfs = uniq(pdfNames)
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    // на всякий случай отбрасываем zip/папки и пр.
+    .filter((x) => !x.toLowerCase().endsWith('.zip'));
   const descrLines = [
     `Оплата всех PDF-файлов по счёту/заказу SPA(1048) #${itemId}.`,
     `Отмечайте пункты чеклиста по мере оплаты.`,
@@ -415,12 +419,39 @@ function buildPaymentTaskDescription({ itemId, pdfNames }) {
   return descrLines.join('\n');
 }
 
+function extractPdfNamesFromDescription(description) {
+  const text = String(description || '');
+  const lines = text.split(/\r?\n/);
+  const out = [];
+  for (const ln of lines) {
+    const m = String(ln || '').match(/^\s*\d+\.\s*(.+?)\s*$/);
+    if (!m) continue;
+    const name = String(m[1] || '').trim();
+    if (!name) continue;
+    out.push(name);
+  }
+  return out;
+}
+
+function normalizePdfName(name) {
+  return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function areSamePdfSets(a = [], b = []) {
+  const as = new Set(a.map(normalizePdfName).filter(Boolean));
+  const bs = new Set(b.map(normalizePdfName).filter(Boolean));
+  if (as.size !== bs.size) return false;
+  for (const k of as) if (!bs.has(k)) return false;
+  return true;
+}
+
 function countPdfLinesInDescription(description) {
   const text = String(description || '');
   const lines = text.split(/\r?\n/);
   let count = 0;
   for (const ln of lines) {
-    if (/^\s*\d+\.[\s\S]*\.pdf\s*$/i.test(String(ln || ''))) count++;
+    // считаем нумерованные строки (1. ..., 2. ...), вне зависимости от расширения
+    if (/^\s*\d+\.\s*(.+?)\s*$/.test(String(ln || ''))) count++;
   }
   return count;
 }
@@ -443,7 +474,7 @@ async function updateTask(taskId, fields) {
 
 /**
  * Обновляет TITLE/DESCRIPTION задачи оплаты под актуальный список PDF.
- * Правило "не дёргать лишний раз": если количество PDF в описании совпадает с pdfNames.length —
+ * Правило "не дёргать лишний раз": если список PDF в описании совпадает с pdfNames —
  * не обновляем описание (а TITLE всё равно обновляем, если отличается).
  */
 async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, deadline }) {
@@ -459,7 +490,7 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, dea
   const currentDescription = String(current?.description ?? current?.DESCRIPTION ?? '');
   const currentDeadline = String(current?.deadline ?? current?.DEADLINE ?? '');
 
-  const currentPdfCount = countPdfLinesInDescription(currentDescription);
+  const currentPdfNames = extractPdfNamesFromDescription(currentDescription);
   const desiredPdfCount = pdfs.length;
 
   const fields = {};
@@ -470,10 +501,13 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, dea
     changes.title = { from: currentTitle, to: desiredTitle };
   }
 
-  // описание обновляем только если меняется число PDF, чтобы не трогать задачу без необходимости
-  if (currentPdfCount !== desiredPdfCount) {
+  // описание обновляем, если меняется состав PDF (не только количество)
+  if (!areSamePdfSets(currentPdfNames, pdfs)) {
     fields.DESCRIPTION = desiredDescription;
-    changes.description = { fromPdfCount: currentPdfCount, toPdfCount: desiredPdfCount };
+    changes.description = {
+      fromCount: currentPdfNames.length,
+      toCount: desiredPdfCount,
+    };
   }
 
   // дедлайн, если передали и он отличается

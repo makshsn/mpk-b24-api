@@ -86,7 +86,9 @@ function normalizePdfList(pdfList) {
     }
     name = String(name || '').trim();
     if (!name) continue;
-    if (!name.toLowerCase().endsWith('.pdf')) continue;
+    // В реальности имя может временно приходить без расширения.
+    // Мы не фильтруем строго по ".pdf", иначе новые пункты могут не попасть в чеклист.
+    if (name.toLowerCase().endsWith('.zip')) continue;
 
     const key = normalizeTitle(name);
     if (!key || seen.has(key)) continue;
@@ -186,10 +188,11 @@ async function getChecklistSummary(taskId) {
 }
 
 /**
- * Создаёт (или дополняет) чеклист "PDF-файлы" так, чтобы количество пунктов
- * совпало с количеством PDF. Дубликаты по названию не добавляет.
+ * Создаёт (или дополняет) чеклист "PDF-файлы" так, чтобы в нём
+ * присутствовали ВСЕ PDF по названиям. Дубликаты по названию не добавляет.
  *
- * Важно: ничего не удаляет. Если пунктов уже больше/равно — не трогаем.
+ * Важно: ничего не удаляет. Если пунктов уже больше — всё равно добавляем
+ * недостающие названия (если каких‑то PDF ещё нет в чеклисте).
  */
 async function ensureChecklistForTask(taskId, pdfList = []) {
   const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
@@ -267,11 +270,20 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
     const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
     const existingCount = children.length;
 
-    // твой критерий: если кол-во файлов == кол-ву пунктов — не трогаем
-    if (existingCount === desiredCount) {
+    const existingTitles = new Set(
+      children
+        .map((it) => normalizeTitle(getField(it, 'TITLE') || ''))
+        .filter(Boolean)
+    );
+
+    // Быстрый критерий "не трогаем": если кол-во файлов == кол-ву пунктов
+    // И при этом ВСЕ нужные названия уже присутствуют.
+    const desiredKeys = desired.map((d) => d.key).filter(Boolean);
+    const allDesiredPresent = desiredKeys.every((k) => existingTitles.has(k));
+    if (existingCount === desiredCount && allDesiredPresent) {
       return {
         ok: true,
-        action: 'skip_already_in_sync_count',
+        action: 'skip_already_in_sync',
         enabled: true,
         taskId: Number(taskId),
         listTitle,
@@ -279,7 +291,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         pdfFound: desiredCount,
         existingCount,
         added: 0,
-        skippedExisting: 0,
+        skippedExisting: desiredCount,
         rootId,
         rootCreated,
         rootsFound,
@@ -288,34 +300,12 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         summary: { total: existingCount, done: children.filter(isDone).length, isAllDone: isChecklistFullyComplete(children) },
       };
     }
-
-    // если пунктов уже больше/равно — ничего не делаем (мы не удаляем)
-    if (existingCount > desiredCount) {
-      return {
-        ok: true,
-        action: 'skip_existing_more_than_desired',
-        enabled: true,
-        taskId: Number(taskId),
-        listTitle,
-        desiredCount,
-        pdfFound: desiredCount,
-        existingCount,
-        added: 0,
-        skippedExisting: 0,
-        rootId,
-        rootCreated,
-        rootsFound,
-        duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
-        items: children,
-        summary: { total: existingCount, done: children.filter(isDone).length, isAllDone: isChecklistFullyComplete(children) },
-      };
-    }
-
-    const existingTitles = new Set(children.map((it) => normalizeTitle(getField(it, 'TITLE') || '')).filter(Boolean));
 
     let added = 0;
     let skippedExisting = 0;
 
+    // Главное правило: добавляем ВСЕ отсутствующие названия PDF,
+    // даже если в чеклисте уже больше пунктов (могли остаться старые/ручные).
     for (const it of desired) {
       const title = String(it.name || '').trim();
       const key = it.key || normalizeTitle(title);
@@ -329,8 +319,6 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       await addChecklistItem(taskId, title, rootId);
       existingTitles.add(key);
       added++;
-
-      if ((existingCount + added) >= desiredCount) break;
     }
 
     // Перечитываем итоговые пункты (для summary и чтобы spa-event мог оценить completion)
@@ -339,7 +327,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
 
     return {
       ok: true,
-      action: 'added_missing_items',
+      action: added > 0 ? 'added_missing_items' : 'skip_already_in_sync_titles',
       enabled: true,
       taskId: Number(taskId),
       listTitle,
