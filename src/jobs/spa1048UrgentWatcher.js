@@ -6,7 +6,7 @@ const { runUrgentToPayOnce } = require('../modules/spa1048/spa1048UrgentToPay');
 // PM2 job: каждые N часов прогоняет счета и переводит в "Срочно к оплате",
 // если до дедлайна <= 3 дней.
 
-const intervalHours = Number(process.env.SPA1048_URGENT_INTERVAL_HOURS || 6); // 4 раза в день = 6ч
+const intervalHours = Number(1); // 4 раза в день = 6ч
 
 async function tick() {
   try {

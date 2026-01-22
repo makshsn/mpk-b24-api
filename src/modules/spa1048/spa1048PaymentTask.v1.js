@@ -399,6 +399,109 @@ async function createPaymentTaskIfMissing({
   return { ok: true, action: 'task_created', taskId: newTaskId };
 }
 
+function buildPaymentTaskTitle({ pdfCount, itemTitle, itemId }) {
+  const cnt = Math.max(0, Number(pdfCount || 0) || 0);
+  return `Оплата счетов (${cnt} PDF): ${itemTitle || ('SPA#' + itemId)}`;
+}
+
+function buildPaymentTaskDescription({ itemId, pdfNames }) {
+  const pdfs = uniq(pdfNames).filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
+  const descrLines = [
+    `Оплата всех PDF-файлов по счёту/заказу SPA(1048) #${itemId}.`,
+    `Отмечайте пункты чеклиста по мере оплаты.`,
+    ``,
+    ...pdfs.map((x, i) => `${i + 1}. ${x}`),
+  ];
+  return descrLines.join('\n');
+}
+
+function countPdfLinesInDescription(description) {
+  const text = String(description || '');
+  const lines = text.split(/\r?\n/);
+  let count = 0;
+  for (const ln of lines) {
+    if (/^\s*\d+\.[\s\S]*\.pdf\s*$/i.test(String(ln || ''))) count++;
+  }
+  return count;
+}
+
+async function getTaskFull(taskId) {
+  const r = await bitrix.call('tasks.task.get', {
+    taskId: Number(taskId),
+    select: ['ID', 'STATUS', 'TITLE', 'DESCRIPTION', 'DEADLINE'],
+  }, { ctx: { step: 'task_get_full', taskId: Number(taskId) } });
+  const t = r?.task || r?.result?.task || r?.result;
+  return t || null;
+}
+
+async function updateTask(taskId, fields) {
+  await bitrix.call('tasks.task.update', {
+    taskId: Number(taskId),
+    fields,
+  }, { ctx: { step: 'task_update_content', taskId: Number(taskId) } });
+}
+
+/**
+ * Обновляет TITLE/DESCRIPTION задачи оплаты под актуальный список PDF.
+ * Правило "не дёргать лишний раз": если количество PDF в описании совпадает с pdfNames.length —
+ * не обновляем описание (а TITLE всё равно обновляем, если отличается).
+ */
+async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, deadline }) {
+  const tid = toNum(taskId);
+  if (!tid) return { ok: false, action: 'skip_no_taskId' };
+
+  const pdfs = uniq(pdfNames).filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
+  const desiredTitle = buildPaymentTaskTitle({ pdfCount: pdfs.length, itemTitle, itemId });
+  const desiredDescription = buildPaymentTaskDescription({ itemId, pdfNames: pdfs });
+
+  const current = await getTaskFull(tid);
+  const currentTitle = String(current?.title ?? current?.TITLE ?? '').trim();
+  const currentDescription = String(current?.description ?? current?.DESCRIPTION ?? '');
+  const currentDeadline = String(current?.deadline ?? current?.DEADLINE ?? '');
+
+  const currentPdfCount = countPdfLinesInDescription(currentDescription);
+  const desiredPdfCount = pdfs.length;
+
+  const fields = {};
+  const changes = {};
+
+  if (currentTitle !== desiredTitle) {
+    fields.TITLE = desiredTitle;
+    changes.title = { from: currentTitle, to: desiredTitle };
+  }
+
+  // описание обновляем только если меняется число PDF, чтобы не трогать задачу без необходимости
+  if (currentPdfCount !== desiredPdfCount) {
+    fields.DESCRIPTION = desiredDescription;
+    changes.description = { fromPdfCount: currentPdfCount, toPdfCount: desiredPdfCount };
+  }
+
+  // дедлайн, если передали и он отличается
+  if (deadline && String(deadline) !== currentDeadline) {
+    fields.DEADLINE = String(deadline);
+    changes.deadline = { from: currentDeadline || null, to: String(deadline) };
+  }
+
+  if (!Object.keys(fields).length) {
+    return {
+      ok: true,
+      action: 'task_content_in_sync',
+      taskId: tid,
+      pdfCount: desiredPdfCount,
+      changes: {},
+    };
+  }
+
+  await updateTask(tid, fields);
+  return {
+    ok: true,
+    action: 'task_content_updated',
+    taskId: tid,
+    pdfCount: desiredPdfCount,
+    changes,
+  };
+}
+
 async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
   const spa = await findSpaByTaskId({ entityTypeId, taskId });
   if (!spa?.id) return { ok: false, action: 'spa_not_found_by_task', taskId: Number(taskId) };
@@ -426,6 +529,7 @@ async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
 module.exports = {
   createPaymentTaskIfMissing,
   ensurePdfChecklist,
+  syncPaymentTaskContent,
   moveSpaToSuccess,
   findSpaByTaskId,
   syncPaidToSuccessByTask,
