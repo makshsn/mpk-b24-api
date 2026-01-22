@@ -316,26 +316,41 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   }
 
   // чеклист (опционален)
-  let checklist = { ok: false, action: 'skipped', reason: 'no_task' };
-  let checklistItems = [];
-  let checklistSummary = null;
-  if (activeTaskId && ensureChecklistForTask) {
-    try {
-      const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
-      checklist = await ensureChecklistForTask(activeTaskId, pdfList);
-      checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
-      if (!checklistItems.length && getChecklistItems) {
-        checklistItems = await getChecklistItems(activeTaskId);
-      }
-      checklistSummary = checklist?.summary || (getChecklistSummary ? await getChecklistSummary(activeTaskId) : null);
-    } catch (e) {
-      checklist = { ok: false, action: 'error', error: e?.message || String(e) };
-    }
-  } else if (!ensureChecklistForTask) {
-    checklist = { ok: false, action: 'skipped', reason: 'module_missing' };
-  }
+// ВАЖНО: изменения чеклиста делаем ТОЛЬКО в момент создания задачи.
+// Для уже существующей задачи — читаем чеклист только для авто-закрытия (read-only).
+let checklist = { ok: true, action: 'skipped', reason: 'no_task' };
+let checklistItems = [];
+let checklistSummary = null;
 
-  // --- Создание задачи, если нет активной (в т.ч. удалена/выполнена) ---
+function checklistChildrenByRoot(items, rootId) {
+  const rid = Number(rootId) || 0;
+  if (!rid || !Array.isArray(items)) return [];
+  return items.filter((it) => String(it?.PARENT_ID ?? it?.parentId ?? '').trim() === String(rid));
+}
+
+if (activeTaskId && getChecklistItems) {
+  try {
+    const allItems = await getChecklistItems(activeTaskId);
+    checklistSummary = getChecklistSummary ? await getChecklistSummary(activeTaskId) : null;
+
+    // если summary знает rootId — ограничиваемся детьми под root
+    if (checklistSummary?.rootId) {
+      checklistItems = checklistChildrenByRoot(allItems, checklistSummary.rootId);
+    } else {
+      // fallback: если summary нет — считаем, что items уже children
+      checklistItems = Array.isArray(allItems) ? allItems : [];
+    }
+
+    checklist = { ok: true, action: 'read_only', enabled: true };
+  } catch (e) {
+    checklist = { ok: false, action: 'error', error: e?.message || String(e) };
+  }
+} else if (!getChecklistItems) {
+  checklist = { ok: false, action: 'skipped', reason: 'module_missing' };
+}
+
+// --- Создание задачи, если нет активной (в т.ч. удалена/выполнена) ---
+
   const accountantId = Number(process.env.SPA1048_ACCOUNTANT_ID || cfg.accountantId || 70);
   let taskCreate = null;
 

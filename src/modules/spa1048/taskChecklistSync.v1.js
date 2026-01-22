@@ -1,447 +1,366 @@
+'use strict';
+
+const fs = require('fs/promises');
+const path = require('path');
+
 const bitrix = require('../../services/bitrix/bitrixClient');
 
-function unwrap(resp) {
-  return resp?.result ?? resp;
-}
-
-function log(level, event, payload) {
-  const line = JSON.stringify({ ts: new Date().toISOString(), level, event, ...payload });
-  if (level === 'error') console.error(line);
-  else console.log(line);
-}
-
-function parseChecklistTitles() {
-  // comma-separated list in .env, e.g. "Счёт выставлен,Согласовано,Оплачено"
-  const raw = process.env.SPA1048_CHECKLIST_TITLES;
-  if (!raw) {
-    return [
-      'Счёт выставлен',
-      'Согласование получено',
-      'Поступление денег подтверждено',
-    ];
-  }
-  return String(raw)
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
+// ===== helpers =====
 function toNum(x) {
   const n = Number(x);
   return Number.isFinite(n) ? n : 0;
 }
 
-function normTitle(x) {
-  return String(x || '').trim().toLowerCase();
+function unwrap(resp) {
+  return resp?.result ?? resp;
 }
 
-function isPdfName(name) {
-  return String(name || '').toLowerCase().endsWith('.pdf');
+function normalizeTitle(s) {
+  return String(s || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
 }
 
-function normalizeNameKey(name) {
-  return String(name || '').trim().toLowerCase();
+function getField(item, name) {
+  if (!item || typeof item !== 'object') return undefined;
+  const lower = String(name).toLowerCase();
+  return (
+    item?.[name] ??
+    item?.[lower] ??
+    item?.FIELDS?.[name] ??
+    item?.FIELDS?.[lower] ??
+    item?.fields?.[name] ??
+    item?.fields?.[lower]
+  );
 }
 
-function hashName(name) {
-  let h = 0;
-  const s = String(name || '');
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h).toString(36);
+function unwrapChecklistList(resp) {
+  const u = unwrap(resp);
+  const items =
+    u?.items ??
+    u?.result?.items ??
+    u?.result ??
+    u?.items ??
+    u ??
+    [];
+  if (Array.isArray(items)) return items;
+  if (items && typeof items === 'object') return Object.values(items);
+  return [];
 }
 
-function pdfMarker(fileId) {
-  const id = toNum(fileId);
-  const nameKey = normalizeNameKey(name);
-  const nameHash = nameKey ? hashName(nameKey) : '';
-  if (id > 0 && nameHash) return `pdf:${id}|${nameHash}`;
-  if (id > 0) return `pdf:${id}`;
-  if (nameHash) return `pdfname:${nameHash}`;
-  return 'pdfname:unknown';
+function unwrapChecklistAddId(resp) {
+  const u = unwrap(resp);
+  const direct = toNum(u);
+  if (direct) return direct;
+  return (
+    toNum(u?.ID) ||
+    toNum(u?.id) ||
+    toNum(u?.item?.id) ||
+    toNum(u?.result?.ID) ||
+    toNum(u?.result?.id) ||
+    0
+  );
 }
 
-function buildPdfTitle({ name, fileId }) {
-  const marker = pdfMarker(fileId);
-  return marker ? `Оплатить: ${name} [${marker}]` : `Оплатить: ${name}`;
+function isRootItem(item) {
+  const p = getField(item, 'PARENT_ID');
+  return p === undefined || p === null || String(p).trim() === '' || String(p).trim() === '0';
 }
 
-function parsePdfMarkerFromTitle(title) {
-  const text = String(title || '').trim();
-  const match = text.match(/\[(pdf|file):([0-9]+)(?:[^\]]*)\]\s*$/i);
-  if (!match) return 0;
-  return toNum(match[2]);
-}
-
-function parseStaticMarkerFromTitle(title) {
-  const text = String(title || '').trim();
-  const match = text.match(/\[static:([^\]]+)\]\s*$/i);
-  return match ? String(match[1]).trim().toLowerCase() : '';
-}
-
-function isRootChecklistItem(item) {
-  const title = String(item?.TITLE || item?.title || '').trim();
-  if (title.startsWith('BX_CHECKLIST_')) return true;
-  const parentId = toNum(item?.PARENT_ID || item?.parentId);
-  return parentId === 0;
-}
-
-function buildStaticTitle(title) {
-  const key = normTitle(title);
-  return key ? `${title} [static:${key}]` : title;
-}
-
-function extractNameFromTitle(title) {
-  const text = String(title || '').trim();
-  const match = text.match(/^Оплатить:\s*(.+?)(?:\s*\[|$)/i);
-  return match ? match[1].trim() : '';
-}
-
-function parsePdfMarkerFromTitle(title) {
-  const text = String(title || '').trim();
-  const match = text.match(/\[([^\]]+)\]\s*$/);
-  if (!match) return { fileId: 0, nameHash: '' };
-  const marker = match[1].trim();
-
-  const legacy = marker.match(/^file:(\d+)$/i);
-  if (legacy) return { fileId: toNum(legacy[1]), nameHash: '' };
-
-  const pdfMatch = marker.match(/^pdf:(.+)$/i);
-  if (pdfMatch) {
-    const parts = pdfMatch[1].split('|');
-    const fileId = toNum(parts[0]);
-    const nameHash = parts[1] ? String(parts[1]).trim() : '';
-    return { fileId, nameHash };
-  }
-
-  const nameMatch = marker.match(/^pdfname:(.+)$/i);
-  if (nameMatch) return { fileId: 0, nameHash: String(nameMatch[1]).trim() };
-
-  return { fileId: 0, nameHash: '' };
-}
-
-function getPdfIdentityFromItem(item) {
-  const title = String(item?.TITLE || item?.title || '').trim();
-  const name = extractNameFromTitle(title);
-  const nameKey = normalizeNameKey(name);
-  const { fileId, nameHash } = parsePdfMarkerFromTitle(title);
-  return {
-    title,
-    name,
-    nameKey,
-    fileId,
-    nameHash,
-  };
-}
-
-async function getChecklist(taskId) {
-  const r = await bitrix.call('task.checklistitem.getlist', { taskId: Number(taskId) }, { ctx: { taskId, step: 'checklist_getlist' } });
-  const u = unwrap(r);
-  const items = u?.items || u?.result?.items || u || [];
-  return Array.isArray(items) ? items : [];
-}
-
-async function addChecklistItem(taskId, title, sortIndex, parentId) {
-  const fields = {
-    TITLE: String(title),
-    SORT_INDEX: Number(sortIndex || 0),
-  };
-  if (Number.isFinite(Number(parentId)) && Number(parentId) >= 0) {
-    fields.PARENT_ID = Number(parentId);
-  }
-  const r = await bitrix.call('task.checklistitem.add', {
-    taskId: Number(taskId),
-    fields,
-  }, { ctx: { taskId, step: 'checklist_add' } });
-  const u = unwrap(r);
-  const id = Number(u?.item?.id || u?.ID || u?.id || u);
-  return { id, title };
-}
-
-async function updateChecklistItem(taskId, itemId, fields) {
-  await bitrix.call('task.checklistitem.update', {
-    taskId: Number(taskId),
-    id: Number(itemId),
-    fields,
-  }, { ctx: { taskId, step: 'checklist_update', itemId } });
-}
-
-async function deleteChecklistItem(taskId, itemId) {
-  await bitrix.call('task.checklistitem.delete', {
-    taskId: Number(taskId),
-    id: Number(itemId),
-  }, { ctx: { taskId, step: 'checklist_delete', itemId } });
-}
-
-function isDone(it) {
-  const v = it?.IS_COMPLETE ?? it?.isComplete ?? it?.COMPLETE ?? it?.complete;
+function isDone(item) {
+  const v = getField(item, 'IS_COMPLETE') ?? getField(item, 'isComplete') ?? getField(item, 'COMPLETE');
   return String(v).toUpperCase() === 'Y' || String(v) === '1' || v === true;
-}
-
-function isChecklistFullyComplete(items) {
-  if (!Array.isArray(items) || items.length === 0) return false;
-  return items.every((it) => String(it?.IS_COMPLETE ?? '').toUpperCase() === 'Y');
-}
-
-async function safeRemoveChecklistItem(taskId, item, softIndex) {
-  const itemId = toNum(item?.ID || item?.id);
-  if (!itemId) return { ok: false, action: 'skip_no_id' };
-  try {
-    await deleteChecklistItem(taskId, itemId);
-    return { ok: true, action: 'deleted', id: itemId };
-  } catch (e) {
-    const title = String(item?.TITLE || item?.title || '').trim();
-    const softTitle = title.startsWith('[REMOVED]') ? title : `[REMOVED] ${title || 'item'}`;
-    try {
-      await updateChecklistItem(taskId, itemId, {
-        TITLE: softTitle,
-        SORT_INDEX: Number(softIndex || 9999),
-      });
-      return { ok: true, action: 'soft_deleted', id: itemId };
-    } catch (err) {
-      log('error', 'CHECKLIST_REMOVE_FAIL', { taskId, itemId, error: err?.message || String(err) });
-      return { ok: false, action: 'remove_failed', id: itemId, error: err?.message || String(err) };
-    }
-  }
 }
 
 function normalizePdfList(pdfList) {
   if (!Array.isArray(pdfList)) return [];
   const out = [];
   const seen = new Set();
+
   for (const it of pdfList) {
-    const name = String(it?.name || '').trim();
-    if (!name || !isPdfName(name)) continue;
-    const fileId = toNum(it?.fileId || it?.id || it?.FILE_ID);
-    const nameKey = normalizeNameKey(name);
-    const key = `${nameKey}|${fileId || '0'}`;
-    if (seen.has(key)) continue;
+    let name = '';
+    if (typeof it === 'string') name = it;
+    else if (it && typeof it === 'object') {
+      name = it.name || it.fileName || it.filename || it.originalName || it.title || '';
+    }
+    name = String(name || '').trim();
+    if (!name) continue;
+    if (!name.toLowerCase().endsWith('.pdf')) continue;
+
+    const key = normalizeTitle(name);
+    if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push({ name, fileId, nameKey });
+    out.push({ name, key });
   }
+
   return out;
 }
 
-async function ensureRoot(taskId, existingItems) {
-  let root = existingItems.find((it) => {
-    const title = String(it?.TITLE || it?.title || '').trim();
-    const parentId = toNum(it?.PARENT_ID || it?.parentId);
-    return parentId === 0 && title.startsWith('BX_CHECKLIST_');
-  });
+// ===== bitrix calls =====
+async function getChecklistItems(taskId) {
+  const r = await bitrix.call('task.checklistitem.getlist', {
+    TASKID: Number(taskId),
+    ORDER: { ID: 'asc' },
+    FILTER: {},
+  }, { ctx: { taskId: Number(taskId), step: 'checklist_getlist' } });
 
-  if (!root) {
-    const createdRoot = await addChecklistItem(taskId, 'BX_CHECKLIST_1', 1, 0);
-    root = { ID: createdRoot?.id, TITLE: 'BX_CHECKLIST_1', PARENT_ID: 0 };
-  }
-
-  return { rootId: root ? toNum(root?.ID || root?.id) : 0, root };
+  return unwrapChecklistList(r);
 }
 
-function buildChecklistSummary(items, rootId, managedOnly = true) {
-  if (!Array.isArray(items) || !rootId) {
-    return { total: 0, done: 0, isAllDone: false };
-  }
-  const children = items.filter((it) => toNum(it?.PARENT_ID || it?.parentId) === rootId);
-  const scoped = managedOnly
-    ? children.filter((it) => getManagedKeyFromTitle(it?.TITLE || it?.title))
-    : children;
-  const total = scoped.length;
-  const done = scoped.filter(isDone).length;
-  return { total, done, isAllDone: total > 0 && total === done };
+async function addChecklistItem(taskId, title, parentId = 0) {
+  const r = await bitrix.call('task.checklistitem.add', {
+    TASKID: Number(taskId),
+    FIELDS: {
+      TITLE: String(title || '').trim(),
+      PARENT_ID: Number(parentId) || 0,
+    },
+  }, { ctx: { taskId: Number(taskId), step: 'checklist_add', parentId: Number(parentId) || 0 } });
+
+  return { id: unwrapChecklistAddId(r), raw: r };
 }
 
-async function ensureChecklistForTask(taskId, pdfList = []) {
+// ===== locking (межпроцессный, чтобы не плодить root при бурсте) =====
+const LOCK_DIR = '/tmp';
+const STALE_MS = 30_000;
+
+function lockPathForTask(taskId) {
+  return path.join(LOCK_DIR, `mpk-b24-checklist-${String(taskId)}.lock`);
+}
+
+async function withProcessFileLock(taskId, fn) {
+  const p = lockPathForTask(taskId);
+
   try {
-    const existing = await getChecklist(taskId);
-    const root = existing.find((it) => {
-      const title = String(it?.TITLE || it?.title || '').trim();
-      const parentId = toNum(it?.PARENT_ID || it?.parentId);
-      return parentId === 0 && title.startsWith('BX_CHECKLIST_');
-    });
-    const rootId = root ? toNum(root?.ID || root?.id) : 0;
-    const scopedItems = rootId
-      ? existing.filter((it) => toNum(it?.PARENT_ID || it?.parentId) === rootId)
-      : existing.filter((it) => !isRootChecklistItem(it));
-    const normalizedPdfList = normalizePdfList(pdfList);
-    const removed = [];
-    const added = [];
-    const updated = [];
-
-    if (normalizedPdfList.length > 0) {
-      const pdfItems = [];
-      const otherItems = [];
-      for (const it of existing) {
-        const identity = getPdfIdentityFromItem(it);
-        if (identity.fileId || identity.nameHash || identity.nameKey) {
-          pdfItems.push({ item: it, identity });
-        } else {
-          otherItems.push(it);
-        }
-      }
-
-      const existingByFileId = new Map();
-      const existingByNameKey = new Map();
-      for (const entry of pdfItems) {
-        const itemId = toNum(entry.item?.ID || entry.item?.id);
-        if (!itemId) continue;
-        if (entry.identity.fileId && !existingByFileId.has(entry.identity.fileId)) {
-          existingByFileId.set(entry.identity.fileId, entry);
-        }
-        if (entry.identity.nameKey && !existingByNameKey.has(entry.identity.nameKey)) {
-          existingByNameKey.set(entry.identity.nameKey, entry);
-        }
-      }
-
-      const usedItemIds = new Set();
-      let sortIndex = 1;
-
-      for (const pdf of normalizedPdfList) {
-        let matched = null;
-        if (pdf.fileId && existingByFileId.has(pdf.fileId)) {
-          matched = existingByFileId.get(pdf.fileId);
-        } else if (pdf.nameKey && existingByNameKey.has(pdf.nameKey)) {
-          matched = existingByNameKey.get(pdf.nameKey);
-        }
-
-        const desiredTitle = buildPdfTitle(pdf);
-        if (matched) {
-          const itemId = toNum(matched.item?.ID || matched.item?.id);
-          usedItemIds.add(itemId);
-          const currentTitle = String(matched.item?.TITLE || matched.item?.title || '').trim();
-          if (currentTitle !== desiredTitle || Number(matched.item?.SORT_INDEX || 0) !== sortIndex) {
-            await updateChecklistItem(taskId, itemId, { TITLE: desiredTitle, SORT_INDEX: sortIndex });
-            updated.push({ id: itemId, title: desiredTitle });
-          }
-        } else {
-          const addedItem = await addChecklistItem(taskId, desiredTitle, sortIndex);
-          added.push(addedItem);
-        }
-        sortIndex++;
-      }
-
-      let softIndex = 10000;
-      for (const entry of pdfItems) {
-        const itemId = toNum(entry.item?.ID || entry.item?.id);
-        if (!itemId || usedItemIds.has(itemId)) continue;
-        removed.push(await safeRemoveChecklistItem(taskId, entry.item, softIndex++));
-      }
-
-      for (const it of otherItems) {
-        removed.push(await safeRemoveChecklistItem(taskId, it, softIndex++));
-      }
-
-      const items = await getChecklist(taskId);
-      const summary = buildChecklistSummary(items, rootId, true);
-      return {
-        ok: true,
-        mode: 'pdf',
-        rootId,
-        desiredKeys,
-        existingKeys,
-        toDeleteIds,
-        toAddKeys,
-        desiredTotal: normalizedPdfList.length,
-        removed,
-        added,
-        updated,
-        items,
-        summary,
-      };
+    const h = await fs.open(p, 'wx');
+    try {
+      await h.writeFile(String(Date.now()));
+      return await fn();
+    } finally {
+      await h.close().catch(() => {});
+      await fs.unlink(p).catch(() => {});
     }
-
-    const desired = parseChecklistTitles();
-    const desiredMap = new Map(desired.map((t) => [`static:${normTitle(t)}`, t]));
-    const kept = new Set();
-    const desiredKeys = desired.map((t) => `static:${normTitle(t)}`);
-    const existingKeys = scopedItems
-      .map((it) => getManagedKeyFromTitle(it?.TITLE || it?.title))
-      .filter(Boolean);
-    const existingKeySet = new Set(existingKeys);
-    const toDeleteIds = [];
-    const toAddKeys = desiredKeys.filter((key) => !existingKeySet.has(key));
-    let softIndex = 10000;
-
-    for (const it of scopedItems) {
-      const title = String(it?.TITLE || it?.title || '').trim();
-      const markerKey = parseStaticMarkerFromTitle(title);
-      const pdfId = parsePdfMarkerFromTitle(title);
-      const titleKey = normTitle(title);
-      const desiredTitle = desiredMap.get(markerKey || titleKey);
-      if (!desiredTitle || kept.has(markerKey || titleKey)) {
-        if (markerKey || pdfId) {
-          removed.push(await safeRemoveChecklistItem(taskId, it, softIndex++));
-        }
-        continue;
-      }
-      kept.add(markerKey || titleKey);
-
-      const withMarker = buildStaticTitle(desiredTitle);
-      if (title !== withMarker) {
-        const itemId = toNum(it?.ID || it?.id);
-        if (itemId) {
-          try {
-            await updateChecklistItem(taskId, itemId, { TITLE: desiredTitle });
-            updated.push({ id: itemId, title: desiredTitle });
-          } catch (e) {
-            log('error', 'CHECKLIST_UPDATE_FAIL', { taskId, itemId, error: e?.message || String(e) });
-          }
-        }
-      }
-    }
-
-    let sortIndex = 1;
-    for (const t of desired) {
-      const key = `static:${normTitle(t)}`;
-      if (!key || kept.has(key)) {
-        sortIndex++;
-        continue;
-      }
-      const addedItem = await addChecklistItem(taskId, buildStaticTitle(t), sortIndex++);
-      added.push(addedItem);
-    }
-
-
-    const items = await getChecklist(taskId);
-    const summary = buildChecklistSummary(items, rootId, true);
-    return {
-      ok: true,
-      mode: 'static',
-      rootId,
-      desiredKeys,
-      existingKeys,
-      toDeleteIds,
-      toAddKeys,
-      desiredTotal: desired.length,
-      removed,
-      added,
-      updated,
-      items,
-      summary,
-    };
   } catch (e) {
-    log('error', 'CHECKLIST_ENSURE_FAIL', { taskId, error: e?.message || String(e) });
-    return { ok: false, action: 'error', error: e?.message || String(e) };
+    if (e?.code === 'EEXIST') {
+      try {
+        const st = await fs.stat(p);
+        const age = Date.now() - st.mtimeMs;
+        if (age > STALE_MS) {
+          await fs.unlink(p).catch(() => {});
+          return await withProcessFileLock(taskId, fn);
+        }
+      } catch {}
+      return { ok: true, action: 'skip_lock_busy', taskId: Number(taskId) };
+    }
+    throw e;
   }
+}
+
+// ===== public API =====
+function isChecklistFullyComplete(items) {
+  if (!Array.isArray(items) || items.length === 0) return false;
+  return items.every(isDone);
 }
 
 async function getChecklistSummary(taskId) {
-  const items = await getChecklist(taskId);
-  const root = items.find((it) => {
-    const title = String(it?.TITLE || it?.title || '').trim();
-    const parentId = toNum(it?.PARENT_ID || it?.parentId);
-    return parentId === 0 && title.startsWith('BX_CHECKLIST_');
+  const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
+  const listKey = normalizeTitle(listTitle);
+
+  const all = await getChecklistItems(taskId);
+
+  const roots = all.filter(isRootItem);
+  const matching = roots
+    .filter((it) => normalizeTitle(getField(it, 'TITLE') || '') === listKey)
+    .map((it) => ({ id: toNum(getField(it, 'ID')), raw: it }))
+    .filter((x) => x.id > 0)
+    .sort((a, b) => a.id - b.id);
+
+  const rootId = matching[0]?.id || 0;
+  if (!rootId) return { total: 0, done: 0, isAllDone: false, rootId: 0, listTitle };
+
+  const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+  const total = children.length;
+  const done = children.filter(isDone).length;
+
+  return { total, done, isAllDone: total > 0 && total === done, rootId, listTitle };
+}
+
+/**
+ * Создаёт (или дополняет) чеклист "PDF-файлы" так, чтобы количество пунктов
+ * совпало с количеством PDF. Дубликаты по названию не добавляет.
+ *
+ * Важно: ничего не удаляет. Если пунктов уже больше/равно — не трогаем.
+ */
+async function ensureChecklistForTask(taskId, pdfList = []) {
+  const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
+  const listKey = normalizeTitle(listTitle);
+
+  const desired = normalizePdfList(pdfList);
+  const desiredCount = desired.length;
+
+  if (!toNum(taskId)) return { ok: false, action: 'invalid_taskId' };
+  if (!desiredCount) {
+    return { ok: true, action: 'skip_no_pdf', enabled: true, desiredCount: 0, listTitle };
+  }
+
+  return await withProcessFileLock(taskId, async () => {
+    // 1) читаем все пункты
+    let all = await getChecklistItems(taskId);
+
+    // 2) ищем root(ы) с нужным названием
+    const roots = all.filter(isRootItem);
+    const matchingRoots = roots.filter((it) => normalizeTitle(getField(it, 'TITLE') || '') === listKey);
+
+    const rootIds = matchingRoots
+      .map((it) => toNum(getField(it, 'ID')))
+      .filter((id) => id > 0)
+      .sort((a, b) => a - b);
+
+    let rootId = rootIds[0] || 0;
+    const rootsFound = matchingRoots.length;
+
+    // если root существует, но id не распарсился — не создаём новый (иначе будет плодиться)
+    if (!rootId && rootsFound > 0) {
+      return {
+        ok: true,
+        action: 'skip_root_exists_but_id_unparsed',
+        enabled: true,
+        taskId: Number(taskId),
+        listTitle,
+        desiredCount,
+        rootsFound,
+        rootId: 0,
+      };
+    }
+
+    // 3) если нет root — создаём один раз
+    let rootCreated = false;
+    if (!rootId) {
+      const created = await addChecklistItem(taskId, listTitle, 0);
+      rootId = toNum(created?.id);
+      rootCreated = Boolean(rootId);
+
+      // Перечитываем, чтобы выбрать минимальный rootId (на случай гонок)
+      all = await getChecklistItems(taskId);
+      const roots2 = all.filter(isRootItem);
+      const matching2 = roots2.filter((it) => normalizeTitle(getField(it, 'TITLE') || '') === listKey);
+      const ids2 = matching2
+        .map((it) => toNum(getField(it, 'ID')))
+        .filter((id) => id > 0)
+        .sort((a, b) => a - b);
+
+      if (ids2[0]) rootId = ids2[0];
+    }
+
+    if (!rootId) {
+      return {
+        ok: false,
+        action: 'cannot_create_or_find_root',
+        enabled: true,
+        taskId: Number(taskId),
+        listTitle,
+        desiredCount,
+      };
+    }
+
+    // 4) дети под root
+    const children = all.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+    const existingCount = children.length;
+
+    // твой критерий: если кол-во файлов == кол-ву пунктов — не трогаем
+    if (existingCount === desiredCount) {
+      return {
+        ok: true,
+        action: 'skip_already_in_sync_count',
+        enabled: true,
+        taskId: Number(taskId),
+        listTitle,
+        desiredCount,
+        pdfFound: desiredCount,
+        existingCount,
+        added: 0,
+        skippedExisting: 0,
+        rootId,
+        rootCreated,
+        rootsFound,
+        duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
+        items: children,
+        summary: { total: existingCount, done: children.filter(isDone).length, isAllDone: isChecklistFullyComplete(children) },
+      };
+    }
+
+    // если пунктов уже больше/равно — ничего не делаем (мы не удаляем)
+    if (existingCount > desiredCount) {
+      return {
+        ok: true,
+        action: 'skip_existing_more_than_desired',
+        enabled: true,
+        taskId: Number(taskId),
+        listTitle,
+        desiredCount,
+        pdfFound: desiredCount,
+        existingCount,
+        added: 0,
+        skippedExisting: 0,
+        rootId,
+        rootCreated,
+        rootsFound,
+        duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
+        items: children,
+        summary: { total: existingCount, done: children.filter(isDone).length, isAllDone: isChecklistFullyComplete(children) },
+      };
+    }
+
+    const existingTitles = new Set(children.map((it) => normalizeTitle(getField(it, 'TITLE') || '')).filter(Boolean));
+
+    let added = 0;
+    let skippedExisting = 0;
+
+    for (const it of desired) {
+      const title = String(it.name || '').trim();
+      const key = it.key || normalizeTitle(title);
+      if (!key) continue;
+
+      if (existingTitles.has(key)) {
+        skippedExisting++;
+        continue;
+      }
+
+      await addChecklistItem(taskId, title, rootId);
+      existingTitles.add(key);
+      added++;
+
+      if ((existingCount + added) >= desiredCount) break;
+    }
+
+    // Перечитываем итоговые пункты (для summary и чтобы spa-event мог оценить completion)
+    const allAfter = await getChecklistItems(taskId);
+    const childrenAfter = allAfter.filter((it) => String(getField(it, 'PARENT_ID') ?? '').trim() === String(rootId));
+
+    return {
+      ok: true,
+      action: 'added_missing_items',
+      enabled: true,
+      taskId: Number(taskId),
+      listTitle,
+      desiredCount,
+      pdfFound: desiredCount,
+      existingCount,
+      added,
+      skippedExisting,
+      rootId,
+      rootCreated,
+      rootsFound,
+      duplicatesRoots: rootsFound > 1 ? rootsFound : 0,
+      items: childrenAfter,
+      summary: { total: childrenAfter.length, done: childrenAfter.filter(isDone).length, isAllDone: isChecklistFullyComplete(childrenAfter) },
+    };
   });
-  const rootId = root ? toNum(root?.ID || root?.id) : 0;
-  return buildChecklistSummary(items, rootId, true);
 }
 
 module.exports = {
   ensureChecklistForTask,
-  isChecklistFullyComplete,
-  getChecklistItems: getChecklist,
+  getChecklistItems,
   getChecklistSummary,
-  buildPdfTitle,
- 
-  buildChecklistSummary,
+  isChecklistFullyComplete,
 };
