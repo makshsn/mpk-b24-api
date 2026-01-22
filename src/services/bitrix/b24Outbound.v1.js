@@ -39,6 +39,12 @@ function verifyOutboundToken(req, envKey) {
   return { ok: true, mode: 'checked', envKey };
 }
 
+function parsePositiveInt(value) {
+  if (value === undefined || value === null) return null;
+  const n = Number(String(value).trim());
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function deepFindFirstInt(obj, wantedKeys, maxDepth = 6) {
   if (!obj || maxDepth <= 0) return null;
   if (typeof obj !== 'object') return null;
@@ -93,23 +99,33 @@ function extractSpaItemId(req) {
 }
 
 function extractTaskId(req) {
+  const { taskId } = extractTaskIdDetailed(req);
+  return taskId;
+}
+
+function extractTaskIdDetailed(req) {
   const b = ensureObjectBody(req);
   const candidates = [
-    req?.query?.taskId,
-    req?.query?.id,
-    b?.taskId,
-    b?.id,
-    b?.data?.FIELDS?.ID,
-    b?.data?.FIELDS?.id,
-    b?.data?.ID,
-    b?.data?.id,
+    { value: b?.data?.FIELDS_AFTER?.TASK_ID, source: 'body.data.FIELDS_AFTER.TASK_ID' },
+    { value: b?.data?.FIELDS_AFTER?.ID, source: 'body.data.FIELDS_AFTER.ID' },
+    { value: req?.query?.taskId, source: 'query.taskId' },
+    { value: req?.query?.id, source: 'query.id' },
+    { value: b?.taskId, source: 'body.taskId' },
+    { value: b?.id, source: 'body.id' },
+    { value: b?.data?.FIELDS?.ID, source: 'body.data.FIELDS.ID' },
+    { value: b?.data?.FIELDS?.id, source: 'body.data.FIELDS.id' },
+    { value: b?.data?.ID, source: 'body.data.ID' },
+    { value: b?.data?.id, source: 'body.data.id' },
   ];
-  for (const v of candidates) {
-    if (v === undefined || v === null) continue;
-    const n = Number(String(v).trim());
-    if (Number.isFinite(n) && n > 0) return n;
+
+  for (const candidate of candidates) {
+    const n = parsePositiveInt(candidate.value);
+    if (n !== null) return { taskId: n, source: candidate.source };
   }
-  return deepFindFirstInt(b, ['ID', 'id']);
+
+  const deep = deepFindFirstInt(b, ['TASK_ID', 'taskId', 'ID', 'id']);
+  if (deep) return { taskId: deep, source: 'deep_find_first_int' };
+  return { taskId: null, source: 'not_found' };
 }
 
 module.exports = {
@@ -117,4 +133,10 @@ module.exports = {
   verifyOutboundToken,
   extractSpaItemId,
   extractTaskId,
+  extractTaskIdDetailed,
 };
+
+/**
+ * Self-check (без внешних библиотек):
+ * node -e "const { extractTaskIdDetailed } = require('./src/services/bitrix/b24Outbound.v1'); const req={ body:{ event:'ONTASKCOMMENTADD', data:{ FIELDS_AFTER:{ ID:'0', MESSAGE_ID:'48760', TASK_ID:'2536' } }, auth:{ application_token:'demo'} }, query:{} }; console.log(extractTaskIdDetailed(req));"
+ */

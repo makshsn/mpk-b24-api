@@ -2,7 +2,7 @@
 
 const bitrix = require('./bitrixClient');
 const cfg = require('../../config/spa1048');
-const { ensureObjectBody, verifyOutboundToken, extractTaskId } = require('./b24Outbound.v1');
+const { ensureObjectBody, verifyOutboundToken, extractTaskIdDetailed } = require('./b24Outbound.v1');
 
 const COMPLETED_STATUS = 5;
 
@@ -79,14 +79,9 @@ function normalizeBindings(value) {
   return [value];
 }
 
-/**
- * UF_CRM_TASK обычно содержит массив строк.
- * У тебя пример: ['T418_58'] где 418 = entityTypeId SPA, 58 = itemId
- *
- * Также поддержим D1048_58 / D_1048_58 etc (если где-то осталось).
- */
-function findSpaItemId(ufCrmTask, entityTypeId) {
+function parseCrmTaskBindings(ufCrmTask) {
   const bindings = normalizeBindings(ufCrmTask);
+  const parsed = [];
 
   // T418_58, T418:58, T418-58
   const reT = /T(?:_|:|-)?(\d+)[_:|-](\d+)/gi;
@@ -98,23 +93,36 @@ function findSpaItemId(ufCrmTask, entityTypeId) {
     if (!text) continue;
 
     let match;
-
     while ((match = reT.exec(text)) !== null) {
       const typeId = parseNumber(match[1]);
       const itemId = parseNumber(match[2]);
-      if (typeId === entityTypeId && itemId) {
-        return { itemId, raw: text, kind: 'T' };
-      }
+      if (typeId && itemId) parsed.push({ typeId, itemId, raw: text, kind: 'T' });
     }
 
     while ((match = reD.exec(text)) !== null) {
       const typeId = parseNumber(match[1]);
       const itemId = parseNumber(match[2]);
-      if (typeId === entityTypeId && itemId) {
-        return { itemId, raw: text, kind: 'D' };
-      }
+      if (typeId && itemId) parsed.push({ typeId, itemId, raw: text, kind: 'D' });
     }
   }
+
+  return parsed;
+}
+
+/**
+ * UF_CRM_TASK обычно содержит массив строк.
+ * У тебя пример: ['T418_58'] где 418 = entityTypeId SPA, 58 = itemId
+ *
+ * Также поддержим D1048_58 / D_1048_58 etc (если где-то осталось).
+ */
+function findSpaItemId(ufCrmTask, preferredTypeIds) {
+  const bindings = parseCrmTaskBindings(ufCrmTask);
+  if (!bindings.length) return null;
+
+  const preferred = preferredTypeIds.filter(Number.isFinite);
+
+  const matched = bindings.find(binding => preferred.includes(binding.typeId));
+  if (matched) return matched;
 
   return null;
 }
@@ -126,7 +134,7 @@ function unwrapTaskGet(resp) {
 async function fetchTask(taskId) {
   const result = await bitrix.call('tasks.task.get', {
     taskId: Number(taskId),
-    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE'],
+    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE', 'CLOSED_DATE', 'CHANGED_DATE'],
   });
   return unwrapTaskGet(result);
 }
@@ -182,7 +190,7 @@ async function pollAndUpdateSpa({ entityTypeId, stageId, windowSec, limit }) {
     if (seen(taskId)) continue;
 
     const ufCrmTask = t?.ufCrmTask || t?.UF_CRM_TASK;
-    const binding = findSpaItemId(ufCrmTask, entityTypeId);
+    const binding = findSpaItemId(ufCrmTask, [entityTypeId, cfg.entityTypeId]);
 
     // помечаем как обработанную даже если без привязки — чтобы не долбить бесконечно
     remember(taskId, ttlMs);
@@ -207,10 +215,19 @@ async function handleTaskCompletionEvent(req, res) {
     if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
   }
 
-  const taskId = extractTaskId(req);
+  /**
+   * Bitrix Outgoing Webhook for tasks приходит как application/x-www-form-urlencoded.
+   * Поля лежат в data[FIELDS_AFTER][TASK_ID] (например, ONTASKCOMMENTADD), поэтому
+   * первым делом достаем TASK_ID из FIELDS_AFTER.
+   */
+  const { taskId, source: taskIdSource } = extractTaskIdDetailed(req);
   const statusAfter = extractStatusAfter(req);
   const statusBefore = extractStatusBefore(req);
-  const debug = req.method === 'GET';
+  const debug = req?.query?.debug === '1';
+
+  if (debug) {
+    console.log('[task-event] taskId_source', { taskId, source: taskIdSource });
+  }
 
   console.log('[task-event] incoming', {
     taskId,
@@ -221,6 +238,7 @@ async function handleTaskCompletionEvent(req, res) {
 
   const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
   const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
+  const preferredTypeIds = [...new Set([entityTypeId, cfg.entityTypeId].filter(Number.isFinite))];
 
   // ==== EMPTY GET from Bitrix Outgoing Webhook ====
   // Bitrix иногда дергает URL без параметров. Тогда мы сами опрашиваем последние закрытые задачи.
@@ -247,21 +265,27 @@ async function handleTaskCompletionEvent(req, res) {
   }
 
   // ==== Normal mode (taskId present) ====
-  if (statusBefore === COMPLETED_STATUS) {
-    return res.json({ ok: true, action: 'skip_already_completed', taskId, statusBefore, statusAfter, debug });
-  }
-
-  if (statusAfter !== COMPLETED_STATUS) {
-    return res.json({ ok: true, action: 'skip_status', taskId, statusBefore, statusAfter, debug });
-  }
-
   const task = await fetchTask(taskId);
   if (!task) {
     return res.status(500).json({ ok: false, error: 'task_not_found', taskId, debug });
   }
 
+  const taskStatus = parseNumber(task?.status || task?.STATUS);
+  if (taskStatus !== COMPLETED_STATUS) {
+    return res.json({
+      ok: true,
+      action: 'skip_not_completed',
+      taskId,
+      statusAfter,
+      statusBefore,
+      taskStatus,
+      debug,
+    });
+  }
+
   const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
-  const binding = findSpaItemId(ufCrmTask, entityTypeId);
+  const binding = findSpaItemId(ufCrmTask, preferredTypeIds);
+  const parsedBindings = parseCrmTaskBindings(ufCrmTask);
 
   console.log('[task-event] bindings', {
     taskId,
@@ -272,11 +296,14 @@ async function handleTaskCompletionEvent(req, res) {
   if (!binding?.itemId) {
     return res.json({
       ok: true,
-      action: 'skip_no_spa_binding',
+      action: ufCrmTask ? 'skip_not_spa1048' : 'skip_no_spa_binding',
       taskId,
       statusAfter,
+      taskStatus,
       debug,
       ufCrmTask,
+      bindings: parsedBindings,
+      preferredTypeIds,
     });
   }
 
