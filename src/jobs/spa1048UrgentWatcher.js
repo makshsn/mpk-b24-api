@@ -1,7 +1,7 @@
 require('dotenv').config({ path: '.env' });
 
 const { logger } = require('../middlewares/requestLogger');
-const { runUrgentToPayOnce } = require('../services/bitrix/spa1048UrgentToPay');
+const { runUrgentToPayOnce } = require('../modules/spa1048/spa1048UrgentToPay');
 
 // PM2 job: каждые N часов прогоняет счета и переводит в "Срочно к оплате",
 // если до дедлайна <= 3 дней.

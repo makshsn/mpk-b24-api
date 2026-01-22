@@ -1,4 +1,4 @@
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
 
 const SPA_ENTITY_TYPE_ID = 1048;

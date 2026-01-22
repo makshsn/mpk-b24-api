@@ -2,11 +2,11 @@
   "name": "mpk-b24-api",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node src/server.js",
-    "test": "jest"
+    "test": "jest --passWithNoTests"
   },
   "keywords": [],
   "author": "",

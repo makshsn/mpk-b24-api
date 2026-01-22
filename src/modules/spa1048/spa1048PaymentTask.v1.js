@@ -1,4 +1,4 @@
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
 const checklistSync = require('./taskChecklistSync.v1');
 

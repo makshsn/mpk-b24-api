@@ -1,4 +1,4 @@
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
 
 // Джоба: переводит счета (SPA entityTypeId=1048) в стадию "Срочно к оплате",

@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
 const { normalizeSpaFiles } = require('./spa1048Files.v1');
 const { createPaymentTaskIfMissing } = require('./spa1048PaymentTask.v1');
@@ -171,6 +171,7 @@ async function autoCloseTaskByChecklist({
   taskId,
   stageId,
   checklistSummary,
+  checklistItems,
   taskStatus,
 }) {
   const stageBefore = normalizeStageId(stageId);
@@ -200,7 +201,7 @@ async function autoCloseTaskByChecklist({
   }
 
   const checklistComplete = isChecklistFullyCompleteExternal || isChecklistFullyCompleteLocal;
-  if (!checklistComplete(checklistItems)) {
+  if (!checklistComplete(checklistItems || [])) {
     return { ok: true, action: 'skip_checklist_not_complete', taskId: Number(taskId), stageBefore, stageAfter: stageBefore };
   }
 
@@ -373,6 +374,7 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     taskId: autoCloseTargetTaskId,
     stageId,
     checklistSummary,
+    checklistItems,
     taskStatus: taskCheck?.status,
   });
 

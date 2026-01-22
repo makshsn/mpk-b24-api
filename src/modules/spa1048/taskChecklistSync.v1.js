@@ -1,4 +1,4 @@
-const bitrix = require('./bitrixClient');
+const bitrix = require('../../services/bitrix/bitrixClient');
 
 function unwrap(resp) {
   return resp?.result ?? resp;
