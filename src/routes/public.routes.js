@@ -3,6 +3,7 @@ const express = require('express');
 const { spaEvent } = require("../controllers/spa1048.controller");
 const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.controller");
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
+const { taskCloseWebhook } = require("../controllers/taskCloseWebhook.controller");
 
 const router = express.Router();
 
@@ -37,5 +38,11 @@ router.get('/task-event', taskCompletionEvent);
 
 router.post('/task-update', taskUpdateWebhook);
 router.get('/task-update', taskUpdateWebhook); // удобно для ручного теста
+
+// Robot webhook: close task without touching SPA stage
+router.post('/task-close', taskCloseWebhook);
+router.get('/task-close', taskCloseWebhook);
+router.post('/task-close/:taskId', taskCloseWebhook);
+router.get('/task-close/:taskId', taskCloseWebhook);
 
 module.exports = router;

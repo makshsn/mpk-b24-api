@@ -177,6 +177,34 @@ async function autoCloseTaskByChecklist({
   const stageBefore = normalizeStageId(stageId);
   const stageSuccess = 'DT1048_14:SUCCESS';
 
+  // Если элемент уже в финальной стадии "провалено/отмена" —
+  // не выполняем авто-закрытие по чеклисту и не переносим в SUCCESS.
+  // Закрытие задачи в этом сценарии делается отдельным роботом через /b24/task-close.
+  const failedStagesEnv = String(
+    process.env.SPA1048_STAGE_FAILED || process.env.SPA1048_STAGE_FAIL || ''
+  )
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const isFailedStage = (sid) => {
+    const s = String(sid || '').trim();
+    if (!s) return false;
+    if (failedStagesEnv.length && failedStagesEnv.includes(s)) return true;
+    // дефолт для SPA1048: DT1048_14:FAIL
+    return /(^|:)(FAIL|FAILED|CANCEL|CANCELED|DECLINE|DECLINED|LOSE|LOST)(:|$)/i.test(s);
+  };
+
+  if (isFailedStage(stageBefore)) {
+    return {
+      ok: true,
+      action: 'skip_spa_failed_stage',
+      taskId: Number(taskId) || 0,
+      stageBefore,
+      stageAfter: stageBefore,
+    };
+  }
+
   if (!taskId) {
     return { ok: true, action: 'skip_no_task', taskId: null, stageBefore, stageAfter: stageBefore };
   }

@@ -145,6 +145,62 @@ async function updateSpaStage({ itemId, stageId, entityTypeId }) {
   });
 }
 
+function normalizeStageId(v) {
+  return String(v ?? '').trim();
+}
+
+function parseCsvEnv(v) {
+  return String(v || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function isFailStage({ stageId, stageSemantics, entityTypeId }) {
+  const s = normalizeStageId(stageId);
+  const sem = String(stageSemantics ?? '').trim().toUpperCase();
+
+  // 1) explicit list from env
+  const explicit = new Set([
+    ...parseCsvEnv(process.env.SPA1048_STAGE_FAILED),
+    ...parseCsvEnv(process.env.SPA1048_STAGE_FAIL),
+    ...parseCsvEnv(process.env.SPA1048_STAGE_CANCELED),
+    ...parseCsvEnv(process.env.SPA1048_STAGE_CANCELLED),
+  ]);
+  if (explicit.size && explicit.has(s)) return true;
+
+  // 2) semantics-based (if Bitrix returns it)
+  if (sem && ['F', 'FAIL', 'FAILED'].includes(sem)) return true;
+
+  // 3) heuristic fallback: stageId contains fail/cancel markers
+  const up = s.toUpperCase();
+  if (up.includes(':SUCCESS')) return false;
+  if (up.includes(':FAIL') || up.includes('FAIL') || up.includes('CANCEL') || up.includes('DECLINE') || up.includes('LOSE')) {
+    return true;
+  }
+
+  // optional: treat other final stages as non-fail by default
+  return false;
+}
+
+function unwrapCrmItemGet(resp) {
+  return resp?.result?.item || resp?.item || resp?.result || null;
+}
+
+async function fetchSpaItemStage({ entityTypeId, itemId }) {
+  const result = await bitrix.call('crm.item.get', {
+    entityTypeId,
+    id: Number(itemId),
+    select: ['id', 'stageId', 'STAGE_ID', 'stageSemantic', 'STAGE_SEMANTIC', 'stageSemantics'],
+  }, { ctx: { step: 'crm_item_get_stage', entityTypeId, itemId } });
+
+  const item = unwrapCrmItemGet(result);
+  const stageId = item?.stageId || item?.STAGE_ID || null;
+  const stageSemantics = item?.stageSemantic || item?.STAGE_SEMANTIC || item?.stageSemantics || null;
+
+  return { stageId, stageSemantics };
+}
+
 // ===== main handler =====
 async function handleTaskCompletionEvent(req, res) {
   try {
@@ -227,6 +283,31 @@ async function handleTaskCompletionEvent(req, res) {
         entityTypeId,
         checklist: { enabled: false, reason: 'disabled_in_task_event' },
       });
+    }
+
+    // ВАЖНО: если элемент SPA уже в финальной "провалено/отмена" — не трогаем стадию.
+    // Иначе, при автоматическом закрытии задач (например, роботом на финальной стадии)
+    // наш task-event мог бы ошибочно перевести элемент в SUCCESS.
+    try {
+      const current = await fetchSpaItemStage({ entityTypeId, itemId: binding.itemId });
+      const currentStageId = normalizeStageId(current?.stageId);
+      if (currentStageId && isFailStage({ stageId: currentStageId, stageSemantics: current?.stageSemantics, entityTypeId })) {
+        console.log('[task-event] skip_spa_failed_stage', { taskId, itemId: binding.itemId, currentStageId });
+        return res.json({
+          ok: true,
+          action: 'skip_spa_failed_stage',
+          taskId,
+          itemId: binding.itemId,
+          taskStatus,
+          currentStageId,
+          debug,
+          ufCrmTask,
+          entityTypeId,
+        });
+      }
+    } catch (e) {
+      // stage read is best-effort; do not break completion flow
+      console.log('[task-event] warn_spa_stage_check_failed', { taskId, itemId: binding.itemId, error: e?.message || String(e) });
     }
 
     const updateResult = await updateSpaStage({ itemId: binding.itemId, stageId, entityTypeId });
