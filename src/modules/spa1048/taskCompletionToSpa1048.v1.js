@@ -2,25 +2,9 @@
 
 const bitrix = require('../../services/bitrix/bitrixClient');
 const cfg = require('../../config/spa1048');
-const { ensureObjectBody, verifyOutboundToken, extractTaskIdDetailed } = require('../../services/bitrix/b24Outbound.v1');
+const { ensureObjectBody, extractTaskIdDetailed } = require('../../services/bitrix/b24Outbound.v1');
 
 const COMPLETED_STATUS = 5;
-
-// ====== simple dedupe cache for polling mode ======
-const processed = new Map(); // taskId -> expireTs
-function remember(taskId, ttlMs) {
-  processed.set(String(taskId), Date.now() + ttlMs);
-}
-function seen(taskId) {
-  const key = String(taskId);
-  const exp = processed.get(key);
-  if (!exp) return false;
-  if (Date.now() > exp) {
-    processed.delete(key);
-    return false;
-  }
-  return true;
-}
 
 // ====== helpers ======
 function parseNumber(value) {
@@ -79,13 +63,20 @@ function normalizeBindings(value) {
   return [value];
 }
 
+/**
+ * ВАЖНО (смарт-процессы):
+ * UF_CRM_TASK для SPA хранит тип в HEX после 'T', а itemId — в десятичном.
+ * Пример: T418_58 => entityTypeId = 0x418 = 1048, itemId = 58
+ * Источник/наблюдение описано в комьюнити, и совпадает с твоим кейсом. :contentReference[oaicite:1]{index=1}
+ */
 function parseCrmTaskBindings(ufCrmTask) {
   const bindings = normalizeBindings(ufCrmTask);
   const parsed = [];
 
-  // T418_58, T418:58, T418-58
-  const reT = /T(?:_|:|-)?(\d+)[_:|-](\d+)/gi;
-  // D1048_58, D_1048_58, D1048:58 etc
+  // T8d_1, T418_58, TBC_3 (HEX), разделители: _, :, -
+  const reT = /T(?:_|:|-)?([0-9a-f]+)[_:|-](\d+)/gi;
+
+  // D1048_58 (на случай альтернативных/старых форматов, decimal)
   const reD = /D(?:_|:|-)?(\d+)[_:|-](\d+)/gi;
 
   for (const raw of bindings) {
@@ -93,10 +84,21 @@ function parseCrmTaskBindings(ufCrmTask) {
     if (!text) continue;
 
     let match;
+
     while ((match = reT.exec(text)) !== null) {
-      const typeId = parseNumber(match[1]);
+      const hexStr = String(match[1] || '').trim();
       const itemId = parseNumber(match[2]);
-      if (typeId && itemId) parsed.push({ typeId, itemId, raw: text, kind: 'T' });
+      const typeId = Number.isFinite(parseInt(hexStr, 16)) ? parseInt(hexStr, 16) : null;
+
+      if (typeId && itemId) {
+        parsed.push({
+          typeId,              // уже DECIMAL entityTypeId (например 1048)
+          itemId,
+          raw: text,
+          kind: 'T',
+          typeHex: hexStr.toLowerCase(),
+        });
+      }
     }
 
     while ((match = reD.exec(text)) !== null) {
@@ -109,22 +111,13 @@ function parseCrmTaskBindings(ufCrmTask) {
   return parsed;
 }
 
-/**
- * UF_CRM_TASK обычно содержит массив строк.
- * У тебя пример: ['T418_58'] где 418 = entityTypeId SPA, 58 = itemId
- *
- * Также поддержим D1048_58 / D_1048_58 etc (если где-то осталось).
- */
 function findSpaItemId(ufCrmTask, preferredTypeIds) {
   const bindings = parseCrmTaskBindings(ufCrmTask);
   if (!bindings.length) return null;
 
   const preferred = preferredTypeIds.filter(Number.isFinite);
-
   const matched = bindings.find(binding => preferred.includes(binding.typeId));
-  if (matched) return matched;
-
-  return null;
+  return matched || null;
 }
 
 function unwrapTaskGet(resp) {
@@ -147,189 +140,105 @@ async function updateSpaStage({ itemId, stageId, entityTypeId }) {
   });
 }
 
-// ====== polling mode (for empty GET webhook) ======
-function isoMinusSeconds(sec) {
-  return new Date(Date.now() - sec * 1000).toISOString();
-}
-
-function unwrapTaskList(resp) {
-  // Bitrix обычно: { result: { tasks: [...] } }
-  return resp?.result?.tasks || resp?.tasks || resp?.result || [];
-}
-
-/**
- * Выбираем недавно изменённые/закрытые задачи со статусом 5.
- * CHANGED_DATE для фильтра — чтобы быстро и надежно.
- */
-async function listRecentlyCompletedTasks({ windowSec, limit }) {
-  const since = isoMinusSeconds(windowSec);
-
-  const r = await bitrix.call('tasks.task.list', {
-    order: { CHANGED_DATE: 'DESC' },
-    filter: { '>=CHANGED_DATE': since, STATUS: COMPLETED_STATUS },
-    select: ['ID', 'STATUS', 'UF_CRM_TASK', 'TITLE', 'CHANGED_DATE', 'CLOSED_DATE'],
-    start: 0,
-  });
-
-  const tasks = unwrapTaskList(r);
-  return tasks.slice(0, limit);
-}
-
-async function pollAndUpdateSpa({ entityTypeId, stageId, windowSec, limit }) {
-  const ttlSec = Number(process.env.TASK_EVENT_POLL_TTL_SEC || Math.max(120, windowSec * 2));
-  const ttlMs = ttlSec * 1000;
-
-  const tasks = await listRecentlyCompletedTasks({ windowSec, limit });
-
-  const updated = [];
-  let processedCount = 0;
-
-  for (const t of tasks) {
-    const taskId = Number(t?.id || t?.ID);
-    if (!taskId) continue;
-    if (seen(taskId)) continue;
-
-    const ufCrmTask = t?.ufCrmTask || t?.UF_CRM_TASK;
-    const binding = findSpaItemId(ufCrmTask, [entityTypeId, cfg.entityTypeId]);
-
-    // помечаем как обработанную даже если без привязки — чтобы не долбить бесконечно
-    remember(taskId, ttlMs);
-
-    if (!binding?.itemId) continue;
-
-    await updateSpaStage({ itemId: binding.itemId, stageId, entityTypeId });
-    processedCount++;
-    updated.push({ taskId, itemId: binding.itemId, ufCrmTask });
-  }
-
-  return { candidates: tasks.length, processed: processedCount, updated };
-}
-
 // ====== main handler ======
 async function handleTaskCompletionEvent(req, res) {
-  ensureObjectBody(req);
+  try {
+    ensureObjectBody(req);
 
-  // Если токен задан в env, будет проверяться; если env пуст — проверка пропускается.
-  if (req.method === 'POST') {
-    const tok = verifyOutboundToken(req, 'B24_OUTBOUND_TASK_TOKEN');
-    if (!tok.ok) return res.status(403).json({ ok: false, error: tok.reason });
-  }
+    const { taskId, source: taskIdSource } = extractTaskIdDetailed(req);
+    const statusAfter = extractStatusAfter(req);
+    const statusBefore = extractStatusBefore(req);
+    const debug = req?.query?.debug === '1';
+    const event = req?.body?.event || req?.body?.EVENT || req?.body?.data?.event || null;
 
-  /**
-   * Bitrix Outgoing Webhook for tasks приходит как application/x-www-form-urlencoded.
-   * Поля лежат в data[FIELDS_AFTER][TASK_ID] (например, ONTASKCOMMENTADD), поэтому
-   * первым делом достаем TASK_ID из FIELDS_AFTER.
-   */
-  const { taskId, source: taskIdSource } = extractTaskIdDetailed(req);
-  const statusAfter = extractStatusAfter(req);
-  const statusBefore = extractStatusBefore(req);
-  const debug = req?.query?.debug === '1';
+    if (debug) console.log('[task-event] taskId_source', { taskId, source: taskIdSource });
 
-  if (debug) {
-    console.log('[task-event] taskId_source', { taskId, source: taskIdSource });
-  }
+    console.log('[task-event] incoming', { event, taskId, statusAfter, statusBefore, method: req.method });
 
-  console.log('[task-event] incoming', {
-    taskId,
-    statusAfter,
-    statusBefore,
-    method: req.method,
-  });
+    const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
+    const stageId =
+      process.env.SPA1048_STAGE_PAID ||
+      process.env.SPA1048_STAGE_SUCCESS ||
+      cfg.stagePaid ||
+      `DT${entityTypeId}_14:SUCCESS`;
 
-  const entityTypeId = Number(process.env.SPA1048_ENTITY_TYPE_ID || cfg.entityTypeId || 1048);
-  const stageId = process.env.SPA1048_STAGE_PAID || 'DT1048_14:SUCCESS';
-  const preferredTypeIds = [...new Set([entityTypeId, cfg.entityTypeId].filter(Number.isFinite))];
+    // без taskId — просто skip (NO polling)
+    if (!taskId) {
+      console.log('[task-event] skip_no_taskId', { event, statusAfter, statusBefore, method: req.method });
+      return res.json({ ok: true, action: 'skip_no_taskId', debug, event, statusAfter, statusBefore, taskIdSource });
+    }
 
-  // ==== EMPTY GET from Bitrix Outgoing Webhook ====
-  // Bitrix иногда дергает URL без параметров. Тогда мы сами опрашиваем последние закрытые задачи.
-  if (!taskId) {
-    const windowSec = Number(process.env.TASK_EVENT_POLL_WINDOW_SEC || 120);
-    const limit = Number(process.env.TASK_EVENT_POLL_LIMIT || 20);
+    const task = await fetchTask(taskId);
+    if (!task) {
+      console.log('[task-event] task_not_found', { taskId });
+      return res.json({ ok: true, action: 'skip_task_not_found', taskId, debug, event });
+    }
 
-    try {
-      console.log('[task-event] poll_start', { windowSec, limit });
-      const r = await pollAndUpdateSpa({ entityTypeId, stageId, windowSec, limit });
-      console.log('[task-event] poll_done', r);
+    const taskStatus = parseNumber(task?.status || task?.STATUS);
 
+    console.log('[task-event] fetched_task', {
+      taskId,
+      taskStatus,
+      ufCrmTask: task?.ufCrmTask || task?.UF_CRM_TASK || null,
+    });
+
+    if (taskStatus !== COMPLETED_STATUS) {
+      console.log('[task-event] skip_not_completed', { taskId, taskStatus });
+      return res.json({ ok: true, action: 'skip_not_completed', taskId, taskStatus, statusAfter, statusBefore, debug });
+    }
+
+    const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
+
+    // Теперь preferredTypeIds — именно entityTypeId (1048)
+    const preferredTypeIds = [...new Set([entityTypeId, cfg.entityTypeId].filter(Number.isFinite))];
+
+    const parsedBindings = parseCrmTaskBindings(ufCrmTask);
+    const binding = findSpaItemId(ufCrmTask, preferredTypeIds);
+
+    console.log('[task-event] bindings', {
+      taskId,
+      ufCrmTask,
+      preferredTypeIds,
+      parsedBindings,
+      foundItemId: binding?.itemId || null,
+    });
+
+    if (!binding?.itemId) {
       return res.json({
         ok: true,
-        action: 'polled',
+        action: ufCrmTask ? 'skip_not_spa1048' : 'skip_no_spa_binding',
+        taskId,
+        statusAfter,
+        taskStatus,
         debug,
-        ...r,
-        hint: 'Bitrix sent empty GET; polling recent completed tasks.',
+        ufCrmTask,
+        bindings: parsedBindings,
+        preferredTypeIds,
+        entityTypeId,
       });
-    } catch (e) {
-      const msg = e?.message || String(e);
-      return res.status(500).json({ ok: false, action: 'poll_error', error: msg, debug });
     }
-  }
 
-  // ==== Normal mode (taskId present) ====
-  const task = await fetchTask(taskId);
-  if (!task) {
-    return res.status(500).json({ ok: false, error: 'task_not_found', taskId, debug });
-  }
+    const updateResult = await updateSpaStage({ itemId: binding.itemId, stageId, entityTypeId });
 
-  const taskStatus = parseNumber(task?.status || task?.STATUS);
-  if (taskStatus !== COMPLETED_STATUS) {
+    console.log('[task-event] spa_stage_updated', { taskId, itemId: binding.itemId, stageId, updateResult });
+
     return res.json({
       ok: true,
-      action: 'skip_not_completed',
+      action: 'spa_stage_updated',
       taskId,
+      itemId: binding.itemId,
       statusAfter,
-      statusBefore,
-      taskStatus,
-      debug,
-    });
-  }
-
-  const ufCrmTask = task?.ufCrmTask || task?.UF_CRM_TASK;
-  const binding = findSpaItemId(ufCrmTask, preferredTypeIds);
-  const parsedBindings = parseCrmTaskBindings(ufCrmTask);
-
-  console.log('[task-event] bindings', {
-    taskId,
-    ufCrmTask,
-    foundItemId: binding?.itemId || null,
-  });
-
-  if (!binding?.itemId) {
-    return res.json({
-      ok: true,
-      action: ufCrmTask ? 'skip_not_spa1048' : 'skip_no_spa_binding',
-      taskId,
-      statusAfter,
-      taskStatus,
+      stageId,
       debug,
       ufCrmTask,
-      bindings: parsedBindings,
-      preferredTypeIds,
+      entityTypeId,
     });
+
+  } catch (e) {
+    const msg = e?.message || String(e);
+    console.log('[task-event] ERROR:', msg, e?.data ? JSON.stringify(e.data) : '');
+    return res.json({ ok: false, error: msg });
   }
-
-  const updateResult = await updateSpaStage({
-    itemId: binding.itemId,
-    stageId,
-    entityTypeId,
-  });
-
-  console.log('[task-event] spa_stage_updated', {
-    taskId,
-    itemId: binding.itemId,
-    stageId,
-    updateResult,
-  });
-
-  return res.json({
-    ok: true,
-    action: 'spa_stage_updated',
-    taskId,
-    itemId: binding.itemId,
-    statusAfter,
-    stageId,
-    debug,
-    ufCrmTask,
-  });
 }
 
 module.exports = { handleTaskCompletionEvent };

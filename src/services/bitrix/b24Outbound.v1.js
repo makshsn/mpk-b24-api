@@ -65,7 +65,7 @@ function deepFindFirstInt(obj, wantedKeys, maxDepth = 6) {
       if (r) return r;
     } else if (typeof v === 'string' || typeof v === 'number') {
       // иногда формы прилетают как плоские ключи типа data[FIELDS][ID]
-      if (/(\[ID\]$|^ID$|\.ID$)/i.test(k)) {
+      if (/\[ID\]$|^ID$|\.ID$/i.test(k)) {
         const n = Number(String(v).trim());
         if (Number.isFinite(n) && n > 0) return n;
       }
@@ -103,19 +103,63 @@ function extractTaskId(req) {
   return taskId;
 }
 
+/**
+ * Bitrix outgoing webhooks по задачам приходят как application/x-www-form-urlencoded.
+ * В зависимости от события taskId может лежать в:
+ * - data[FIELDS_AFTER][TASK_ID] (пример: ONTASKCOMMENTADD)
+ * - data[FIELDS_AFTER][ID]      (пример: ONTASKUPDATE)
+ * - data[FIELDS_BEFORE][ID]
+ * а также могут встречаться варианты без обёртки data.
+ */
 function extractTaskIdDetailed(req) {
   const b = ensureObjectBody(req);
+
   const candidates = [
+    // 1) Явный TASK_ID (самый надёжный)
     { value: b?.data?.FIELDS_AFTER?.TASK_ID, source: 'body.data.FIELDS_AFTER.TASK_ID' },
+    { value: b?.data?.FIELDS_AFTER?.task_id, source: 'body.data.FIELDS_AFTER.task_id' },
+    { value: b?.data?.FIELDS_AFTER?.TASKID, source: 'body.data.FIELDS_AFTER.TASKID' },
+
+    { value: b?.data?.FIELDS?.TASK_ID, source: 'body.data.FIELDS.TASK_ID' },
+    { value: b?.data?.FIELDS?.task_id, source: 'body.data.FIELDS.task_id' },
+    { value: b?.data?.TASK_ID, source: 'body.data.TASK_ID' },
+    { value: b?.data?.task_id, source: 'body.data.task_id' },
+
+    { value: b?.FIELDS_AFTER?.TASK_ID, source: 'body.FIELDS_AFTER.TASK_ID' },
+    { value: b?.FIELDS_AFTER?.task_id, source: 'body.FIELDS_AFTER.task_id' },
+    { value: b?.FIELDS?.TASK_ID, source: 'body.FIELDS.TASK_ID' },
+    { value: b?.FIELDS?.task_id, source: 'body.FIELDS.task_id' },
+    { value: b?.TASK_ID, source: 'body.TASK_ID' },
+    { value: b?.task_id, source: 'body.task_id' },
+
+    // 2) ID (часто это ID задачи для ONTASKUPDATE/ONTASKADD)
     { value: b?.data?.FIELDS_AFTER?.ID, source: 'body.data.FIELDS_AFTER.ID' },
-    { value: req?.query?.taskId, source: 'query.taskId' },
-    { value: req?.query?.id, source: 'query.id' },
-    { value: b?.taskId, source: 'body.taskId' },
-    { value: b?.id, source: 'body.id' },
+    { value: b?.data?.FIELDS_AFTER?.id, source: 'body.data.FIELDS_AFTER.id' },
+    { value: b?.data?.FIELDS_BEFORE?.ID, source: 'body.data.FIELDS_BEFORE.ID' },
+    { value: b?.data?.FIELDS_BEFORE?.id, source: 'body.data.FIELDS_BEFORE.id' },
     { value: b?.data?.FIELDS?.ID, source: 'body.data.FIELDS.ID' },
     { value: b?.data?.FIELDS?.id, source: 'body.data.FIELDS.id' },
     { value: b?.data?.ID, source: 'body.data.ID' },
     { value: b?.data?.id, source: 'body.data.id' },
+
+    { value: b?.FIELDS_AFTER?.ID, source: 'body.FIELDS_AFTER.ID' },
+    { value: b?.FIELDS_AFTER?.id, source: 'body.FIELDS_AFTER.id' },
+    { value: b?.FIELDS_BEFORE?.ID, source: 'body.FIELDS_BEFORE.ID' },
+    { value: b?.FIELDS_BEFORE?.id, source: 'body.FIELDS_BEFORE.id' },
+    { value: b?.FIELDS?.ID, source: 'body.FIELDS.ID' },
+    { value: b?.FIELDS?.id, source: 'body.FIELDS.id' },
+    { value: b?.ID, source: 'body.ID' },
+    { value: b?.id, source: 'body.id' },
+
+    // 3) query (ручные тесты / кастомные вызовы)
+    { value: req?.query?.taskId, source: 'query.taskId' },
+    { value: req?.query?.TASK_ID, source: 'query.TASK_ID' },
+    { value: req?.query?.id, source: 'query.id' },
+    { value: req?.query?.ID, source: 'query.ID' },
+
+    // 4) простые варианты
+    { value: b?.taskId, source: 'body.taskId' },
+    { value: b?.TASK_ID, source: 'body.TASK_ID (duplicate)' },
   ];
 
   for (const candidate of candidates) {
@@ -123,8 +167,10 @@ function extractTaskIdDetailed(req) {
     if (n !== null) return { taskId: n, source: candidate.source };
   }
 
-  const deep = deepFindFirstInt(b, ['TASK_ID', 'taskId', 'ID', 'id']);
+  // Fallback: глубокий поиск. Важно: сначала TASK_ID, потом ID.
+  const deep = deepFindFirstInt(b, ['TASK_ID', 'task_id', 'taskId', 'ID', 'id']);
   if (deep) return { taskId: deep, source: 'deep_find_first_int' };
+
   return { taskId: null, source: 'not_found' };
 }
 
