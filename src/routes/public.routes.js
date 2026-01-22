@@ -5,6 +5,8 @@ const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.cont
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
 
 const router = express.Router();
+const inspectRoutes = require('./inspect.routes');
+router.use(inspectRoutes);
 
 // DEBUG middleware: не стопает обработчики
 router.use((req, res, next) => {

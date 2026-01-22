@@ -5,6 +5,16 @@ const bitrixRoutes = require('./routes/bitrix.routes');
 const publicRoutes = require('./routes/public.routes');
 
 const app = express();
+// RAW body collector (для инспектора вебхуков)
+app.use((req, res, next) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      req.rawBody = Buffer.concat(chunks);
+      next();
+    });
+  });
+  
 
 
 app.use(express.json({ limit: "25mb" }));
