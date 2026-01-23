@@ -144,8 +144,11 @@ async function runUrgentToPayOnce(options = {}) {
   // UF поля приходят в camelCase
   const deadlineKey = ufToCamel(cfg.deadlineField || 'UF_CRM_8_1768219591855') || 'ufCrm8_1768219591855';
   const payDateKey = ufToCamel(cfg.paidAtField || 'UF_CRM_8_1768219659763') || 'ufCrm8_1768219659763';
+  const stageCodeKey = ufToCamel(cfg.stageCodeField || 'UF_CRM_8_1768308894857') || 'ufCrm8_1768308894857';
 
-  const select = ['id', 'title', 'stageId', deadlineKey, payDateKey];
+  // stageId в Bitrix обычно уже является кодом стадии (например DT1048_14:SUCCESS),
+  // но на портале может быть отдельное UF поле с кодом текущей стадии — учитываем оба.
+  const select = ['id', 'title', 'stageId', stageCodeKey, deadlineKey, payDateKey];
 
   const summary = {
     ok: true,
@@ -204,7 +207,7 @@ async function runUrgentToPayOnce(options = {}) {
     const movedIds = [];
 
     for (const it of items) {
-      const currentStage = String(it.stageId || '');
+      const currentStage = String(it?.[stageCodeKey] || it.stageId || '');
 
       // 1) Игнорируем urgent — чтобы не дергать повторно
       if (currentStage === urgentStageId) continue;

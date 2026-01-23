@@ -16,14 +16,19 @@ module.exports = {
   stageActive: parseList(process.env.SPA1048_STAGE_ACTIVE),
 
   // success (оплачено)
-  stagePaid: process.env.SPA1048_STAGE_PAID || process.env.SPA1048_STAGE_SUCCESS || '',
+  // Если env не задан, используем дефолтный код стадии успеха для SPA1048.
+  stagePaid: process.env.SPA1048_STAGE_PAID || process.env.SPA1048_STAGE_SUCCESS || 'DT1048_14:SUCCESS',
 
   // финальные стадии (любые), например success/fail и т.п.
   stageFinal: parseList(process.env.SPA1048_STAGE_FINAL),
 
   // fail стадии (явно): то, что нужно игнорировать при проверке и переводе в "Срочно к оплате"
-  // можно задавать одним id или списком через запятую
-  stageFail: parseList(process.env.SPA1048_STAGE_FAIL || process.env.SPA1048_STAGE_FAILURE),
+  // Можно задавать одним id или списком через запятую.
+  // Если env не задан, используем дефолтный код fail для SPA1048.
+  stageFail: parseList(process.env.SPA1048_STAGE_FAIL || process.env.SPA1048_STAGE_FAILURE || 'DT1048_14:FAIL'),
+
+  // Код текущей стадии (в отдельном UF поле, если используется на портале)
+  stageCodeField: 'UF_CRM_8_1768308894857',
 
   // поля SPA
   deadlineField: 'UF_CRM_8_1768219591855',
