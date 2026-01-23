@@ -19,7 +19,6 @@ function log(level, event, payload) {
 
 function extLower(name) { return path.extname(String(name || '')).toLowerCase(); }
 function isZipName(name) { return extLower(name) === '.zip'; }
-function isPdfName(name) { return extLower(name) === '.pdf'; }
 function nameKey(name) { return String(name || '').trim().toLowerCase(); }
 
 function listNameSet(list) {
@@ -43,10 +42,21 @@ function isSameNameSet(a, b) {
 
 function detectExtByMagic(buf) {
   if (!buf || buf.length < 4) return '';
-  // ZIP: PK..
-  if (buf[0] === 0x50 && buf[1] === 0x4b) return '.zip';
+  // Важно: множество форматов (docx/xlsx/pptx/odt/...) являются ZIP-контейнерами (PK..).
+  // По магии НЕЛЬЗЯ определять "архив" для распаковки — это ломает кейс с docx.
+  // Поэтому расширение .zip по сигнатуре не выставляем.
+
   // PDF: %PDF
   if (buf[0] === 0x25 && buf[1] === 0x50 && buf[2] === 0x44 && buf[3] === 0x46) return '.pdf';
+
+  // PNG
+  if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) return '.png';
+
+  // JPEG
+  if (buf[0] === 0xff && buf[1] === 0xd8) return '.jpg';
+
+  // GIF
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return '.gif';
   return '';
 }
 
@@ -63,7 +73,7 @@ function uniqByName(files) {
   return out;
 }
 
-function buildPdfList({ afterFiles, pdfNames }) {
+function buildFileList({ afterFiles, fileNames }) {
   const byName = new Map();
   const unnamed = [];
   for (const f of afterFiles || []) {
@@ -81,7 +91,7 @@ function buildPdfList({ afterFiles, pdfNames }) {
   const usedUnnamed = new Set();
   const out = [];
   const seen = new Set();
-  for (const rawName of pdfNames || []) {
+  for (const rawName of fileNames || []) {
     const name = String(rawName || '').trim();
     if (!name) continue;
     const key = name.toLowerCase();
@@ -246,9 +256,9 @@ async function downloadToBuffer({ fileRef, entityTypeId, itemId, fieldNameUpper 
   return { buffer: buf, filename };
 }
 
-async function extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb }) {
+async function extractAllFilesFromZip(zipPath, { maxFiles, maxFileMb }) {
   const out = [];
-  const maxBytes = Number(maxPdfMb) * 1024 * 1024;
+  const maxBytes = Number(maxFileMb) * 1024 * 1024;
 
   const dir = await unzipper.Open.file(zipPath);
   for (const entry of dir.files) {
@@ -256,13 +266,20 @@ async function extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb }) {
     if (entry.type !== 'File') continue;
 
     const name = entry.path.split('/').pop();
-    if (!isPdfName(name)) continue;
+    if (!name) continue;
     if (entry.uncompressedSize > maxBytes) continue;
 
     const buf = await entry.buffer();
     out.push({ name, buffer: buf });
   }
   return out;
+}
+
+// ZIP определяем строго по имени (.zip).
+// Не используем magic (PK..), потому что docx/xlsx/pptx тоже PK..
+function isZipForBusiness(name, buffer) {
+  void buffer;
+  return extLower(name) === '.zip';
 }
 
 /**
@@ -313,7 +330,7 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
   const fieldCamel = cfg.filesFieldCamel || 'ufCrm8_1768219060503';
 
   const maxFiles = Number(process.env.SPA1048_FILES_MAX_FILES || 200);
-  const maxPdfMb = Number(process.env.SPA1048_FILES_MAX_PDF_MB || 15);
+  const maxFileMb = Number(process.env.SPA1048_FILES_MAX_FILE_MB || process.env.SPA1048_FILES_MAX_PDF_MB || 15);
 
   const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'spa1048-files-'));
 
@@ -383,40 +400,38 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       return { ok: false, action: 'download_none', beforeIds, afterIds: [] };
     }
 
-    // ZIP детект: по имени ИЛИ по магии
-    const zips = downloaded.filter(x => isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip');
-    const nonZips = downloaded.filter(x => !(isZipName(x.name) || detectExtByMagic(x.buffer) === '.zip'));
-    const pdfsInField = downloaded.filter(x => isPdfName(x.name) || detectExtByMagic(x.buffer) === '.pdf');
+    // ZIP детект: строго по .zip (магия только если расширения нет)
+    const zips = downloaded.filter(x => isZipForBusiness(x.name, x.buffer));
+    const nonZips = downloaded.filter(x => !isZipForBusiness(x.name, x.buffer));
 
-    if (!zips.length && pdfsInField.length > 0) {
-      const pdfNames = pdfsInField
-        .map(x => x.name)
-        .filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
-      const pdfList = buildPdfList({ afterFiles: before.files, pdfNames });
+    // Если zip нет — это уже финальный список файлов для чеклиста/описания (любой формат)
+    if (!zips.length) {
+      const fileNames = uniqByName(downloaded).map(x => x.name);
+      const fileList = buildFileList({ afterFiles: before.files, fileNames });
 
-      log('debug', 'FILES_SKIP_NO_ZIP_PDF_ALREADY', {
+      log('debug', 'FILES_SKIP_NO_ZIP_FILES_ALREADY', {
         itemId,
-        pdfCount: pdfNames.length,
+        fileCount: fileNames.length,
         beforeCount: beforeIds.length,
       });
 
       return {
         ok: true,
-        action: 'skipped_no_zip_pdf_already',
+        action: 'skipped_no_zip_files_already',
         beforeIds,
         afterIds: beforeIds,
         beforeCount: beforeIds.length,
         afterCount: beforeIds.length,
         zipDetected: false,
-        extractedPdfCount: 0,
-        pdfNames,
-        pdfList,
+        extractedCount: 0,
+        fileNames,
+        fileList,
         downloadErrors,
       };
     }
 
     let uploadList = [];
-    let extractedPdfCount = 0;
+    let extractedCount = 0;
     let action = 'reuploaded';
 
     if (zips.length) {
@@ -424,35 +439,35 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       const zipPath = path.join(tmpRoot, `in_${zip.id}.zip`);
       await fsp.writeFile(zipPath, zip.buffer);
 
-      const pdfs = await extractPdfsFromZip(zipPath, { maxFiles, maxPdfMb });
-      extractedPdfCount = pdfs.length;
+      const extracted = await extractAllFilesFromZip(zipPath, { maxFiles, maxFileMb });
+      extractedCount = extracted.length;
 
       log('debug', 'ZIP_EXTRACT', {
         itemId,
         zipId: zip.id,
         zipName: zip.name,
-        pdfCount: extractedPdfCount,
+        fileCount: extractedCount,
         maxFiles,
-        maxPdfMb,
+        maxFileMb,
       });
 
-      if (!pdfs.length) {
+      if (!extracted.length) {
         await addTimelineComment({
           entityTypeId,
           entityId: itemId,
-          text: `ZIP найден, но подходящих PDF нет (или не прошли лимиты).`,
-          dedupKey: `zip_no_pdf_${itemId}`,
+          text: `ZIP найден, но подходящих файлов нет (или не прошли лимиты).`,
+          dedupKey: `zip_no_files_${itemId}`,
         });
         uploadList = downloaded.map(x => ({ name: x.name, buffer: x.buffer }));
-        action = 'reuploaded_zip_no_pdf';
+        action = 'reuploaded_zip_no_files';
       } else {
-        // как ты просил: перезаписываем НОВЫМИ PDF (старые не сохраняем),
-        // но nonZip оставляем (если хочешь убирать nonZip — скажи, выкину)
+        // Как и договаривались: ZIP заменяем содержимым архива.
+        // nonZip оставляем (если нужно выкидывать — скажи).
         uploadList = [
           ...nonZips.map(x => ({ name: x.name, buffer: x.buffer })),
-          ...pdfs.map(x => ({ name: x.name, buffer: x.buffer })),
+          ...extracted.map(x => ({ name: x.name, buffer: x.buffer })),
         ];
-        action = 'zip_replaced_with_pdfs';
+        action = 'zip_replaced_with_files';
       }
     } else {
       uploadList = downloaded.map(x => ({ name: x.name, buffer: x.buffer }));
@@ -472,10 +487,8 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
     }
 
     if (isSameNameSet(uploadList, downloaded)) {
-      const pdfNames = uploadList
-        .filter(x => String(x.name || '').toLowerCase().endsWith('.pdf'))
-        .map(x => x.name);
-      const pdfList = buildPdfList({ afterFiles: before.files, pdfNames });
+      const fileNames = uploadList.map(x => x.name);
+      const fileList = buildFileList({ afterFiles: before.files, fileNames });
 
       log('debug', 'FILES_SKIP_NO_CHANGES', {
         itemId,
@@ -491,9 +504,9 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
         beforeCount: beforeIds.length,
         afterCount: beforeIds.length,
         zipDetected: zips.length > 0,
-        extractedPdfCount,
-        pdfNames,
-        pdfList,
+        extractedCount,
+        fileNames,
+        fileList,
         downloadErrors,
       };
     }
@@ -503,7 +516,7 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       action,
       uploadCount: uploadList.length,
       zipDetected: zips.length > 0,
-      extractedPdfCount,
+      extractedCount,
     });
 
     await updateUfFilesReplace({ entityTypeId, itemId, fieldCamel, fieldUpper, uploadList });
@@ -511,10 +524,8 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
     const after = await getItemFiles({ entityTypeId, itemId, fieldUpper, fieldCamel });
     const afterIds = after.files.map(f => f.id);
 
-    const pdfNames = uploadList
-      .filter(x => String(x.name || '').toLowerCase().endsWith('.pdf'))
-      .map(x => x.name);
-    const pdfList = buildPdfList({ afterFiles: after.files, pdfNames });
+    const fileNames = uploadList.map(x => x.name);
+    const fileList = buildFileList({ afterFiles: after.files, fileNames });
 
     const res = {
       ok: true,
@@ -524,9 +535,9 @@ async function normalizeSpaFiles({ entityTypeId, itemId }) {
       beforeCount: beforeIds.length,
       afterCount: afterIds.length,
       zipDetected: zips.length > 0,
-      extractedPdfCount,
-      pdfNames,
-      pdfList,
+      extractedCount,
+      fileNames,
+      fileList,
       downloadErrors,
     };
 

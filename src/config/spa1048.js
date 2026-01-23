@@ -10,7 +10,7 @@ function parseList(v) {
 
 module.exports = {
   entityTypeId: Number(process.env.SPA1048_ENTITY_TYPE_ID || 1048),
-  accountantId: Number(process.env.SPA1048_ACCOUNTANT_ID || 1),
+  accountantId: Number(process.env.SPA1048_ACCOUNTANT_ID || 70),
 
   // ВАЖНО: эти списки теперь парсятся корректно даже если в .env есть кавычки и пробелы
   stageActive: parseList(process.env.SPA1048_STAGE_ACTIVE),

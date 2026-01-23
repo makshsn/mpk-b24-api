@@ -333,7 +333,7 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     }
   }
 
-  // файлы (ZIP -> PDF)
+  // файлы (ZIP -> распаковка всех файлов)
   let files = { ok: true, action: 'skipped' };
   if (filesEnabled) {
     try {
@@ -343,18 +343,18 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     }
   }
 
-  // --- СИНХРА КОНТЕНТА ЗАДАЧИ (TITLE/DESCRIPTION) под актуальные PDF ---
-  // Важно: обновляем только когда меняется количество PDF (см. syncPaymentTaskContent),
+  // --- СИНХРА КОНТЕНТА ЗАДАЧИ (TITLE/DESCRIPTION) под актуальные файлы ---
+  // Важно: обновляем только когда меняется набор файлов (см. syncPaymentTaskContent),
   // чтобы не триггерить лишние ONTASKUPDATE.
   let taskContentSync = { ok: true, action: 'skipped', reason: 'no_task' };
   if (activeTaskId && typeof syncPaymentTaskContent === 'function') {
     try {
-      const pdfNames = Array.isArray(files?.pdfNames) ? files.pdfNames : [];
+      const fileNames = Array.isArray(files?.fileNames) ? files.fileNames : [];
       taskContentSync = await syncPaymentTaskContent({
         taskId: activeTaskId,
         itemId,
         itemTitle: item.title || item.TITLE || '',
-        pdfNames,
+        fileNames,
         deadline: deadline ? taskDeadlineIso(deadline) : null,
       });
     } catch (e) {
@@ -368,8 +368,8 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   let checklistSummary = null;
   if (activeTaskId && ensureChecklistForTask) {
     try {
-      const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
-      checklist = await ensureChecklistForTask(activeTaskId, pdfList);
+      const fileList = Array.isArray(files?.fileList) ? files.fileList : (Array.isArray(files?.pdfList) ? files.pdfList : []);
+      checklist = await ensureChecklistForTask(activeTaskId, fileList);
       checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
       if (!checklistItems.length && getChecklistItems) {
         checklistItems = await getChecklistItems(activeTaskId);
@@ -387,22 +387,22 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   let taskCreate = null;
 
   if (!activeTaskId && taskCheck?.reason !== 'task_completed') {
-    const pdfNames = Array.isArray(files?.pdfNames) ? files.pdfNames : [];
+    const fileNames = Array.isArray(files?.fileNames) ? files.fileNames : [];
     taskCreate = await createPaymentTaskIfMissing({
       entityTypeId,
       itemId,
       itemTitle: item.title || item.TITLE || '',
       deadline: taskDeadlineIso(deadline),
       taskId,
-      pdfNames,
-      responsibleId: Number(item.assignedById || item.ASSIGNED_BY_ID || accountantId),
+      fileNames,
+      responsibleId: Number(accountantId),
       stageId,
     });
 
     if (taskCreate?.taskId && ensureChecklistForTask) {
       try {
-        const pdfList = Array.isArray(files?.pdfList) ? files.pdfList : [];
-        checklist = await ensureChecklistForTask(taskCreate.taskId, pdfList);
+        const fileList = Array.isArray(files?.fileList) ? files.fileList : (Array.isArray(files?.pdfList) ? files.pdfList : []);
+        checklist = await ensureChecklistForTask(taskCreate.taskId, fileList);
         checklistItems = Array.isArray(checklist?.items) ? checklist.items : [];
         if (!checklistItems.length && getChecklistItems) {
           checklistItems = await getChecklistItems(taskCreate.taskId);

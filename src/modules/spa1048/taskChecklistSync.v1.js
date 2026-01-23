@@ -73,12 +73,12 @@ function isDone(item) {
   return String(v).toUpperCase() === 'Y' || String(v) === '1' || v === true;
 }
 
-function normalizePdfList(pdfList) {
-  if (!Array.isArray(pdfList)) return [];
+function normalizeFileList(fileList) {
+  if (!Array.isArray(fileList)) return [];
   const out = [];
   const seen = new Set();
 
-  for (const it of pdfList) {
+  for (const it of fileList) {
     let name = '';
     if (typeof it === 'string') name = it;
     else if (it && typeof it === 'object') {
@@ -86,7 +86,6 @@ function normalizePdfList(pdfList) {
     }
     name = String(name || '').trim();
     if (!name) continue;
-    if (!name.toLowerCase().endsWith('.pdf')) continue;
 
     const key = normalizeTitle(name);
     if (!key || seen.has(key)) continue;
@@ -187,7 +186,7 @@ function isChecklistFullyComplete(items) {
 }
 
 async function getChecklistSummary(taskId) {
-  const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
+  const listTitle = String(process.env.TASK_FILES_CHECKLIST_TITLE || process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
   const listKey = normalizeTitle(listTitle);
 
   const all = await getChecklistItems(taskId);
@@ -217,10 +216,11 @@ async function getChecklistSummary(taskId) {
  * - дубликаты пунктов (одинаковый TITLE) схлопываются до одного
  */
 async function ensureChecklistForTask(taskId, pdfList = []) {
-  const listTitle = String(process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
+  const listTitle = String(process.env.TASK_FILES_CHECKLIST_TITLE || process.env.TASK_PDF_CHECKLIST_TITLE || 'PDF-файлы').trim();
   const listKey = normalizeTitle(listTitle);
 
-  const desired = normalizePdfList(pdfList);
+  // Исторически параметр назывался pdfList. Теперь это общий список файлов.
+  const desired = normalizeFileList(pdfList);
   const desiredCount = desired.length;
 
   if (!toNum(taskId)) return { ok: false, action: 'invalid_taskId' };
@@ -266,6 +266,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
           taskId: Number(taskId),
           listTitle,
           desiredCount: 0,
+          filesFound: 0,
           pdfFound: 0,
           rootsFound,
           rootsDeleted: 0,
@@ -281,6 +282,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
           taskId: Number(taskId),
           listTitle,
           desiredCount: 0,
+          filesFound: 0,
           pdfFound: 0,
           rootsFound,
           rootId: 0,
@@ -310,6 +312,7 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
         taskId: Number(taskId),
         listTitle,
         desiredCount: 0,
+        filesFound: 0,
         pdfFound: 0,
         rootsFound,
         rootsDeleted,
@@ -443,6 +446,8 @@ async function ensureChecklistForTask(taskId, pdfList = []) {
       taskId: Number(taskId),
       listTitle,
       desiredCount,
+      filesFound: desiredCount,
+      // backward-compat for older logs/clients
       pdfFound: desiredCount,
       existingCount,
       added,

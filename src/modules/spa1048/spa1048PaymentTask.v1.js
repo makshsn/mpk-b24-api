@@ -3,7 +3,7 @@ const cfg = require('../../config/spa1048');
 const checklistSync = require('./taskChecklistSync.v1');
 
 /**
- * Создаём задачу на оплату всех PDF + чеклист по именам PDF.
+ * Создаём задачу на оплату всех файлов (любого формата) + чеклист по именам файлов.
  * После полной отметки чеклиста — переводим SPA в SUCCESS.
  */
 
@@ -334,6 +334,7 @@ async function createPaymentTaskIfMissing({
   itemTitle,
   deadline,
   taskId,
+  fileNames,
   pdfNames,
   responsibleId,
   stageId,
@@ -376,14 +377,16 @@ async function createPaymentTaskIfMissing({
     }
   }
 
-  const pdfs = uniq(pdfNames).filter(x => x.toLowerCase().endsWith('.pdf'));
-  const title = `Оплата счетов (${pdfs.length} PDF): ${itemTitle || ('SPA#' + itemId)}`;
+  // принимаем как fileNames (новое) так и pdfNames (старое)
+  const names = Array.isArray(fileNames) ? fileNames : pdfNames;
+  const files = uniq(names).map(x => String(x || '').trim()).filter(Boolean);
+  const title = `Оплата счетов (${files.length} файлов): ${itemTitle || ('SPA#' + itemId)}`;
 
   const descrLines = [
-    `Оплата всех PDF-файлов по счёту/заказу SPA(1048) #${itemId}.`,
+    `Оплата всех файлов по счёту/заказу SPA(1048) #${itemId}.`,
     `Отмечайте пункты чеклиста по мере оплаты.`,
     ``,
-    ...pdfs.map((x, i) => `${i + 1}. ${x}`),
+    ...files.map((x, i) => `${i + 1}. ${x}`),
   ];
   const description = descrLines.join('\n');
 
@@ -399,27 +402,27 @@ async function createPaymentTaskIfMissing({
   return { ok: true, action: 'task_created', taskId: newTaskId };
 }
 
-function buildPaymentTaskTitle({ pdfCount, itemTitle, itemId }) {
-  const cnt = Math.max(0, Number(pdfCount || 0) || 0);
-  return `Оплата счетов (${cnt} PDF): ${itemTitle || ('SPA#' + itemId)}`;
+function buildPaymentTaskTitle({ fileCount, itemTitle, itemId }) {
+  const cnt = Math.max(0, Number(fileCount || 0) || 0);
+  return `Оплата счетов (${cnt} файлов): ${itemTitle || ('SPA#' + itemId)}`;
 }
 
-function buildPaymentTaskDescription({ itemId, pdfNames }) {
-  const pdfs = uniq(pdfNames)
+function buildPaymentTaskDescription({ itemId, fileNames }) {
+  const files = uniq(fileNames)
     .map((x) => String(x || '').trim())
     .filter(Boolean)
-    // на всякий случай отбрасываем zip/папки и пр.
-    .filter((x) => !x.toLowerCase().endsWith('.zip'));
+    // на всякий случай отбрасываем папки (если вдруг прилетят)
+    .filter((x) => !x.endsWith('/') && !x.endsWith('\\'));
   const descrLines = [
-    `Оплата всех PDF-файлов по счёту/заказу SPA(1048) #${itemId}.`,
+    `Оплата всех файлов по счёту/заказу SPA(1048) #${itemId}.`,
     `Отмечайте пункты чеклиста по мере оплаты.`,
     ``,
-    ...pdfs.map((x, i) => `${i + 1}. ${x}`),
+    ...files.map((x, i) => `${i + 1}. ${x}`),
   ];
   return descrLines.join('\n');
 }
 
-function extractPdfNamesFromDescription(description) {
+function extractFileNamesFromDescription(description) {
   const text = String(description || '');
   const lines = text.split(/\r?\n/);
   const out = [];
@@ -433,13 +436,13 @@ function extractPdfNamesFromDescription(description) {
   return out;
 }
 
-function normalizePdfName(name) {
+function normalizeFileName(name) {
   return String(name || '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
-function areSamePdfSets(a = [], b = []) {
-  const as = new Set(a.map(normalizePdfName).filter(Boolean));
-  const bs = new Set(b.map(normalizePdfName).filter(Boolean));
+function areSameNameSets(a = [], b = []) {
+  const as = new Set(a.map(normalizeFileName).filter(Boolean));
+  const bs = new Set(b.map(normalizeFileName).filter(Boolean));
   if (as.size !== bs.size) return false;
   for (const k of as) if (!bs.has(k)) return false;
   return true;
@@ -473,25 +476,26 @@ async function updateTask(taskId, fields) {
 }
 
 /**
- * Обновляет TITLE/DESCRIPTION задачи оплаты под актуальный список PDF.
- * Правило "не дёргать лишний раз": если список PDF в описании совпадает с pdfNames —
+ * Обновляет TITLE/DESCRIPTION задачи оплаты под актуальный список файлов.
+ * Правило "не дёргать лишний раз": если список файлов в описании совпадает с fileNames —
  * не обновляем описание (а TITLE всё равно обновляем, если отличается).
  */
-async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, deadline }) {
+async function syncPaymentTaskContent({ taskId, itemId, itemTitle, fileNames, pdfNames, deadline }) {
   const tid = toNum(taskId);
   if (!tid) return { ok: false, action: 'skip_no_taskId' };
 
-  const pdfs = uniq(pdfNames).filter(x => String(x || '').toLowerCase().endsWith('.pdf'));
-  const desiredTitle = buildPaymentTaskTitle({ pdfCount: pdfs.length, itemTitle, itemId });
-  const desiredDescription = buildPaymentTaskDescription({ itemId, pdfNames: pdfs });
+  const names = Array.isArray(fileNames) ? fileNames : pdfNames;
+  const files = uniq(names).map(x => String(x || '').trim()).filter(Boolean);
+  const desiredTitle = buildPaymentTaskTitle({ fileCount: files.length, itemTitle, itemId });
+  const desiredDescription = buildPaymentTaskDescription({ itemId, fileNames: files });
 
   const current = await getTaskFull(tid);
   const currentTitle = String(current?.title ?? current?.TITLE ?? '').trim();
   const currentDescription = String(current?.description ?? current?.DESCRIPTION ?? '');
   const currentDeadline = String(current?.deadline ?? current?.DEADLINE ?? '');
 
-  const currentPdfNames = extractPdfNamesFromDescription(currentDescription);
-  const desiredPdfCount = pdfs.length;
+  const currentFileNames = extractFileNamesFromDescription(currentDescription);
+  const desiredFileCount = files.length;
 
   const fields = {};
   const changes = {};
@@ -502,7 +506,7 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, dea
   }
 
   // описание обновляем, если меняется состав PDF (не только количество)
-  if (!areSamePdfSets(currentPdfNames, pdfs)) {
+  if (!areSameNameSets(currentFileNames, files)) {
     fields.DESCRIPTION = desiredDescription;
     changes.description = {
       fromCount: currentPdfNames.length,
@@ -521,7 +525,7 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, dea
       ok: true,
       action: 'task_content_in_sync',
       taskId: tid,
-      pdfCount: desiredPdfCount,
+      fileCount: desiredFileCount,
       changes: {},
     };
   }
@@ -531,7 +535,7 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, pdfNames, dea
     ok: true,
     action: 'task_content_updated',
     taskId: tid,
-    pdfCount: desiredPdfCount,
+    fileCount: desiredFileCount,
     changes,
   };
 }
@@ -548,7 +552,7 @@ async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
     return { ok: true, action: 'already_success', itemId, taskId: Number(taskId) };
   }
 
-  // pdfNames мы тут не знаем — считаем “оплачено”, если ВСЕ пункты чеклиста завершены
+  // Имена файлов мы тут не знаем — считаем “оплачено”, если ВСЕ пункты чеклиста завершены
   const items = await getChecklist(taskId);
   const realItems = items.filter(i => String(i.TITLE || '').trim()); // без пустых
   if (!realItems.length) return { ok: false, action: 'checklist_empty', itemId, taskId: Number(taskId) };
