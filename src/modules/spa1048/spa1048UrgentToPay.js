@@ -50,6 +50,12 @@ function daysLeft(deadlineYmd) {
   return Math.floor(diffMs / 86400000);
 }
 
+function toIdList(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(x => String(x).trim()).filter(Boolean);
+  return [String(v).trim()].filter(Boolean);
+}
+
 async function listCategories(entityTypeId) {
   // Возвращает [{id, name, ...}, ...]
   const r = await bitrix.call('crm.category.list', { entityTypeId: Number(entityTypeId) });
@@ -135,28 +141,12 @@ async function runUrgentToPayOnce(options = {}) {
   const urgentIdFromEnv = options.urgentStageId || process.env.SPA1048_URGENT_STAGE_ID || '';
   const days = Number(options.days || process.env.SPA1048_URGENT_DAYS || 3);
 
-  // В crm.item.list поля приходят в camelCase (как и в crm.item.get),
-  // поэтому для UF_* берём именно camel ключ.
-  // Приоритет: options/env -> cfg -> дефолт.
-  const deadlineFieldOrig =
-    options.deadlineField ||
-    process.env.SPA1048_DEADLINE_FIELD ||
-    cfg.deadlineField ||
-    'UF_CRM_8_1768219591855';
-  const deadlineKey = ufToCamel(deadlineFieldOrig) || 'ufCrm8_1768219591855';
-
-  // Дата оплаты: если заполнено — счёт не трогаем
-  // Важно: в конфиге поле называется paidAtField, но в разных местах ранее встречалось paymentDateField.
-  // Здесь поддерживаем оба варианта, чтобы не ломать совместимость.
-  const paidAtFieldOrig =
-    options.paidAtField ||
-    process.env.SPA1048_PAID_AT_FIELD ||
-    cfg.paidAtField ||
-    cfg.paymentDateField ||
-    'UF_CRM_8_1768219659763';
-  const payDateKey = ufToCamel(paidAtFieldOrig) || 'ufCrm8_1768219659763';
+  // UF поля приходят в camelCase
+  const deadlineKey = ufToCamel(cfg.deadlineField || 'UF_CRM_8_1768219591855') || 'ufCrm8_1768219591855';
+  const payDateKey = ufToCamel(cfg.paidAtField || 'UF_CRM_8_1768219659763') || 'ufCrm8_1768219659763';
 
   const select = ['id', 'title', 'stageId', deadlineKey, payDateKey];
+
   const summary = {
     ok: true,
     entityTypeId,
@@ -171,20 +161,41 @@ async function runUrgentToPayOnce(options = {}) {
     const { items: stages } = await listStages(entityTypeId, categoryId);
     const urgentStageId = pickUrgentStageId(stages, urgentName, urgentIdFromEnv);
 
-    // Стадия 'успешно оплачено' — никогда не тащим обратно в срочные
+    // success (оплачено)
     const paidStageId = String(cfg.stagePaid || process.env.SPA1048_STAGE_PAID || '').trim();
+
+    // fail (может быть 1..N)
+    const failStageIds = [
+      ...toIdList(options.failStageIds),
+      ...toIdList(cfg.stageFail),
+      ...toIdList(process.env.SPA1048_STAGE_FAIL),
+      ...toIdList(process.env.SPA1048_STAGE_FAILURE),
+    ].map(String).filter(Boolean);
+
+    // Любые финальные стадии (если заданы списком)
+    const finalStageIds = [
+      ...toIdList(cfg.stageFinal),
+      ...toIdList(process.env.SPA1048_STAGE_FINAL),
+      ...toIdList(paidStageId),
+      ...failStageIds,
+    ].map(String).filter(Boolean);
+
+    const finalSet = new Set(finalStageIds);
 
     if (!urgentStageId) {
       summary.categories[categoryId] = { ok: false, error: `urgent stage not found by name="${urgentName}"` };
       continue;
     }
 
-    // Сканируем только процессные стадии (SEMANTICS=P), исключая urgent.
-    // Это безопаснее, чем гадать по "не равно" или env спискам.
+    // 1) Если SEMANTICS корректные — берём только процессные стадии (P)
+    // 2) Если SEMANTICS пустые/не приходят — processStageIds будет пустой,
+    //    тогда item.list пойдёт без фильтра stageId, но ниже мы всё равно отрежем финальные стадии.
     const processStageIds = buildProcessStageIds(stages, urgentStageId);
 
-    // Сканируем только процессные стадии, но исключаем paidStageId (если он почему-то тоже SEMANTICS=P)
-    const stageIdsToScan = paidStageId ? processStageIds.filter(id => id !== paidStageId) : processStageIds;
+    // stageIdsToScan = process - urgent - финальные (success/fail и т.п.)
+    const stageIdsToScan = processStageIds
+      .filter(id => id !== urgentStageId)
+      .filter(id => !finalSet.has(String(id)));
 
     const items = await listSpaItems(entityTypeId, categoryId, stageIdsToScan, select);
     summary.scannedTotal += items.length;
@@ -194,24 +205,18 @@ async function runUrgentToPayOnce(options = {}) {
 
     for (const it of items) {
       const currentStage = String(it.stageId || '');
-      if (paidStageId && currentStage === paidStageId) continue;
 
-      // Если дата оплаты заполнена — это уже оплачено, не дёргаем
-      const paidAt =
-        it?.[payDateKey] ??
-        it?.[paidAtFieldOrig] ??
-        it?.[ufToCamel(paidAtFieldOrig)] ??
-        null;
-      if (paidAt) continue;
-
+      // 1) Игнорируем urgent — чтобы не дергать повторно
       if (currentStage === urgentStageId) continue;
 
-      const dlYmd = dateOnly(
-        it?.[deadlineKey] ??
-        it?.[deadlineFieldOrig] ??
-        it?.[ufToCamel(deadlineFieldOrig)] ??
-        null
-      );
+      // 2) Игнорируем любые финальные стадии: success и fail (и всё, что ты положишь в SPA1048_STAGE_FINAL)
+      if (finalSet.has(currentStage)) continue;
+
+      // 3) Если дата оплаты заполнена — это уже оплачено, не трогаем
+      const paidAt = it?.[payDateKey] || null;
+      if (paidAt) continue;
+
+      const dlYmd = dateOnly(it?.[deadlineKey] || it?.[cfg.deadlineField] || null);
       if (!dlYmd) continue;
 
       const left = daysLeft(dlYmd);
@@ -220,6 +225,7 @@ async function runUrgentToPayOnce(options = {}) {
       if (left <= days) {
         try {
           await updateStage(entityTypeId, it.id, urgentStageId);
+
           const commentText = `Счёт переведён в "Срочно к оплате", т.к. до оплаты менее ${days} дн. (осталось: ${left} дн.).`;
           try {
             await bitrix.call('crm.timeline.comment.add', {
@@ -232,6 +238,7 @@ async function runUrgentToPayOnce(options = {}) {
           } catch (e) {
             // комментарий не критичен
           }
+
           moved++;
           movedIds.push(Number(it.id));
         } catch (e) {
@@ -244,10 +251,12 @@ async function runUrgentToPayOnce(options = {}) {
     summary.categories[categoryId] = {
       ok: true,
       urgentStageId,
+      failStageIds,
+      finalStageIds,
       processStages: processStageIds.length,
       scanned: items.length,
       moved,
-      movedIds: movedIds.slice(0, 50), // чтобы не раздувать лог
+      movedIds: movedIds.slice(0, 50),
     };
   }
 

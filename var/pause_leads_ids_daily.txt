@@ -1,5 +1,5 @@
-[dotenv@17.2.3] injecting env (33) from .env -- tip: ⚙️  specify custom .env file path with { path: '/custom/path/.env' }
-PAUSE=UC_79QMBF count=80
+[dotenv@17.2.3] injecting env (33) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
+PAUSE=UC_79QMBF count=81
 206
 214
 222
@@ -80,3 +80,4 @@ PAUSE=UC_79QMBF count=80
 1764
 1792
 1842
+1854

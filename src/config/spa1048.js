@@ -14,9 +14,16 @@ module.exports = {
 
   // ВАЖНО: эти списки теперь парсятся корректно даже если в .env есть кавычки и пробелы
   stageActive: parseList(process.env.SPA1048_STAGE_ACTIVE),
+
+  // success (оплачено)
   stagePaid: process.env.SPA1048_STAGE_PAID || process.env.SPA1048_STAGE_SUCCESS || '',
 
+  // финальные стадии (любые), например success/fail и т.п.
   stageFinal: parseList(process.env.SPA1048_STAGE_FINAL),
+
+  // fail стадии (явно): то, что нужно игнорировать при проверке и переводе в "Срочно к оплате"
+  // можно задавать одним id или списком через запятую
+  stageFail: parseList(process.env.SPA1048_STAGE_FAIL || process.env.SPA1048_STAGE_FAILURE),
 
   // поля SPA
   deadlineField: 'UF_CRM_8_1768219591855',
