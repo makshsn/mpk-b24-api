@@ -66,6 +66,31 @@ function normalizeBindings(value) {
   return [value];
 }
 
+function dateOnly(x) {
+  if (!x) return null;
+  return String(x).slice(0, 10); // YYYY-MM-DD
+}
+
+// UF_CRM_8_1768219591855 -> ufCrm8_1768219591855
+function ufToCamel(uf) {
+  const s = String(uf || '').trim();
+  if (!s) return '';
+  if (!/^UF_/i.test(s)) return s;
+
+  const lower = s.toLowerCase();
+  const parts = lower.split('_').filter(Boolean);
+  if (!parts.length) return '';
+
+  let out = parts[0]; // uf
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i];
+    if (i === 1) { out += p.charAt(0).toUpperCase() + p.slice(1); continue; } // Crm
+    if (/^\d+$/.test(p) && i === 2) { out += p; continue; } // 8
+    out += '_' + p; // _176821...
+  }
+  return out;
+}
+
 /**
  * UF_CRM_TASK для SPA: тип в HEX после 'T', itemId — decimal.
  * Пример: T418_58 => entityTypeId = 0x418 = 1048, itemId = 58
@@ -131,7 +156,8 @@ async function fetchTask(taskId) {
       'DESCRIPTION',
       'CLOSED_DATE',
       'CHANGED_DATE',
-      PDF_FILES_FIELD, // оставляем select — поле может пригодиться в debug
+      'DEADLINE', // <-- важно для синка
+      PDF_FILES_FIELD,
     ],
   });
   return unwrapTaskGet(result);
@@ -156,11 +182,10 @@ function parseCsvEnv(v) {
     .filter(Boolean);
 }
 
-function isFailStage({ stageId, stageSemantics, entityTypeId }) {
+function isFailStage({ stageId, stageSemantics }) {
   const s = normalizeStageId(stageId);
   const sem = String(stageSemantics ?? '').trim().toUpperCase();
 
-  // 1) explicit list from env
   const explicit = new Set([
     ...parseCsvEnv(process.env.SPA1048_STAGE_FAILED),
     ...parseCsvEnv(process.env.SPA1048_STAGE_FAIL),
@@ -169,17 +194,14 @@ function isFailStage({ stageId, stageSemantics, entityTypeId }) {
   ]);
   if (explicit.size && explicit.has(s)) return true;
 
-  // 2) semantics-based (if Bitrix returns it)
   if (sem && ['F', 'FAIL', 'FAILED'].includes(sem)) return true;
 
-  // 3) heuristic fallback: stageId contains fail/cancel markers
   const up = s.toUpperCase();
   if (up.includes(':SUCCESS')) return false;
   if (up.includes(':FAIL') || up.includes('FAIL') || up.includes('CANCEL') || up.includes('DECLINE') || up.includes('LOSE')) {
     return true;
   }
 
-  // optional: treat other final stages as non-fail by default
   return false;
 }
 
@@ -199,6 +221,43 @@ async function fetchSpaItemStage({ entityTypeId, itemId }) {
   const stageSemantics = item?.stageSemantic || item?.STAGE_SEMANTIC || item?.stageSemantics || null;
 
   return { stageId, stageSemantics };
+}
+
+async function fetchSpaDeadlineYmd({ entityTypeId, itemId, origField }) {
+  const camel = ufToCamel(origField);
+  const r = await bitrix.call('crm.item.get', {
+    entityTypeId,
+    id: Number(itemId),
+    select: ['id', origField, camel].filter(Boolean),
+  }, { ctx: { step: 'crm_item_get_deadline', entityTypeId, itemId } });
+
+  const item = unwrapCrmItemGet(r);
+  const raw = item?.[camel] || item?.[origField] || null;
+  return dateOnly(raw);
+}
+
+async function syncSpaDeadlineFromTask({ entityTypeId, itemId, taskDeadlineRaw }) {
+  const taskYmd = dateOnly(taskDeadlineRaw);
+  if (!taskYmd) return { ok: true, action: 'skip_no_task_deadline' };
+
+  const origField = String(process.env.SPA1048_DEADLINE_FIELD_ORIG || cfg.deadlineField || 'UF_CRM_8_1768219591855');
+  const camel = ufToCamel(origField) || 'ufCrm8_1768219591855';
+
+  const spaYmd = await fetchSpaDeadlineYmd({ entityTypeId, itemId, origField });
+
+  if (spaYmd === taskYmd) return { ok: true, action: 'no_change', deadline: taskYmd };
+
+  await bitrix.call('crm.item.update', {
+    entityTypeId,
+    id: Number(itemId),
+    useOriginalUfNames: 'Y',
+    fields: {
+      [origField]: taskYmd,
+      [camel]: taskYmd,
+    },
+  }, { ctx: { step: 'crm_item_update_deadline', entityTypeId, itemId } });
+
+  return { ok: true, action: 'spa_deadline_updated_from_task', from: spaYmd || null, to: taskYmd };
 }
 
 // ===== main handler =====
@@ -240,9 +299,37 @@ async function handleTaskCompletionEvent(req, res) {
       taskId,
       taskStatus,
       ufCrmTask: ufCrmTask || null,
+      deadline: task?.deadline || task?.DEADLINE || null,
     });
 
-    // обновляем SPA только при выполненной задаче
+    // ==== ВАЖНО: синк дедлайна делаем всегда, даже если задача не завершена ====
+    const preferredTypeIds = [...new Set([entityTypeId, cfg.entityTypeId].filter(Number.isFinite))];
+    const binding = findSpaItemId(ufCrmTask, preferredTypeIds);
+    const parsedBindings = parseCrmTaskBindings(ufCrmTask);
+
+    if (debug) {
+      console.log('[task-event] bindings', {
+        taskId,
+        ufCrmTask,
+        preferredTypeIds,
+        foundItemId: binding?.itemId || null,
+        bindings: parsedBindings,
+      });
+    }
+
+    let deadlineSync = { ok: true, action: 'skipped' };
+    if (binding?.itemId) {
+      deadlineSync = await syncSpaDeadlineFromTask({
+        entityTypeId,
+        itemId: binding.itemId,
+        taskDeadlineRaw: task?.deadline || task?.DEADLINE || null,
+      });
+    } else {
+      deadlineSync = { ok: true, action: 'skip_no_spa_binding' };
+    }
+    // ========================================================================
+
+    // обновляем стадию SPA только при выполненной задаче
     if (taskStatus !== COMPLETED_STATUS) {
       console.log('[task-event] skip_not_completed', { taskId, taskStatus });
       return res.json({
@@ -253,13 +340,10 @@ async function handleTaskCompletionEvent(req, res) {
         statusAfter,
         statusBefore,
         debug,
+        deadlineSync,
         checklist: { enabled: false, reason: 'disabled_in_task_event' },
       });
     }
-
-    const preferredTypeIds = [...new Set([entityTypeId, cfg.entityTypeId].filter(Number.isFinite))];
-    const binding = findSpaItemId(ufCrmTask, preferredTypeIds);
-    const parsedBindings = parseCrmTaskBindings(ufCrmTask);
 
     console.log('[task-event] bindings', {
       taskId,
@@ -281,17 +365,16 @@ async function handleTaskCompletionEvent(req, res) {
         bindings: parsedBindings,
         preferredTypeIds,
         entityTypeId,
+        deadlineSync,
         checklist: { enabled: false, reason: 'disabled_in_task_event' },
       });
     }
 
-    // ВАЖНО: если элемент SPA уже в финальной "провалено/отмена" — не трогаем стадию.
-    // Иначе, при автоматическом закрытии задач (например, роботом на финальной стадии)
-    // наш task-event мог бы ошибочно перевести элемент в SUCCESS.
+    // Если элемент SPA уже в финальной "провалено/отмена" — не трогаем стадию.
     try {
       const current = await fetchSpaItemStage({ entityTypeId, itemId: binding.itemId });
       const currentStageId = normalizeStageId(current?.stageId);
-      if (currentStageId && isFailStage({ stageId: currentStageId, stageSemantics: current?.stageSemantics, entityTypeId })) {
+      if (currentStageId && isFailStage({ stageId: currentStageId, stageSemantics: current?.stageSemantics })) {
         console.log('[task-event] skip_spa_failed_stage', { taskId, itemId: binding.itemId, currentStageId });
         return res.json({
           ok: true,
@@ -303,10 +386,10 @@ async function handleTaskCompletionEvent(req, res) {
           debug,
           ufCrmTask,
           entityTypeId,
+          deadlineSync,
         });
       }
     } catch (e) {
-      // stage read is best-effort; do not break completion flow
       console.log('[task-event] warn_spa_stage_check_failed', { taskId, itemId: binding.itemId, error: e?.message || String(e) });
     }
 
@@ -324,6 +407,7 @@ async function handleTaskCompletionEvent(req, res) {
       debug,
       ufCrmTask,
       entityTypeId,
+      deadlineSync,
       checklist: { enabled: false, reason: 'disabled_in_task_event' },
     });
 

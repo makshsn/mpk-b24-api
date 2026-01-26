@@ -1,4 +1,5 @@
 const { run } = require('../services/bitrix/syncNextContactFromTask');
+const { processSpa1048TaskUpdate } = require('../modules/spa1048/spa1048TaskOnUpdate.v1');
 
 function extractTaskId(body) {
   // Bitrix может прислать разными форматами (JSON или form-urlencoded)
@@ -29,8 +30,14 @@ async function taskUpdate(req, res) {
     const taskId = extractTaskId(req.body) || extractTaskId(req.query);
     if (!taskId) return res.json({ ok: true, skipped: 'no_task_id_in_event' });
 
-    const result = await run({ taskId });
-    return res.json(result);
+    // 1) SPA1048: синхронизация дедлайна (дата) из задачи (дата+время) + проверка чеклиста
+    // 2) Остальная логика проекта: syncNextContactFromTask
+    const [spa1048, nextContactSync] = await Promise.all([
+      processSpa1048TaskUpdate({ payload: req.body || {}, query: req.query || {}, taskId }),
+      run({ taskId }),
+    ]);
+
+    return res.json({ ok: true, taskId, spa1048, nextContactSync });
   } catch (e) {
     // чтобы Bitrix не долбил повторно, отвечаем JSON, без падения сервера
     return res.json({ ok: false, error: String(e?.message || e) });

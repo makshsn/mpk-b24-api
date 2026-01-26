@@ -154,21 +154,31 @@ async function moveSpaToSuccess(itemId) {
   });
 }
 
-async function handleTaskUpdateWebhook(req, res) {
-  const payload = req.body || {};
-  const taskIdRaw = pickTaskId(payload);
+/**
+ * Обработчик события обновления задачи (без привязки к express).
+ *
+ * Важно:
+ * - DEADLINE в задаче содержит дату+время.
+ * - UF_CRM_8_1768219591855 в SPA — тип "дата".
+ *   Поэтому сравнение/запись делаем в формате YYYY-MM-DD.
+ */
+async function processSpa1048TaskUpdate({ payload, query, taskId: taskIdOverride } = {}) {
+  const body = payload || {};
+  const taskIdRaw = taskIdOverride || pickTaskId(body);
 
   if (!taskIdRaw || isNaN(Number(taskIdRaw))) {
-    return res.status(400).json({ ok: false, error: 'taskId_not_found_in_payload' });
+    return { ok: true, action: 'skip_no_task_id_in_payload' };
   }
+
   const taskId = Number(taskIdRaw);
 
   // защита: токен (рекомендую включить)
-  const { qToken, appToken } = pickToken(payload, req);
+  const fakeReq = { query: query || {} };
+  const { qToken, appToken } = pickToken(body, fakeReq);
   const EXPECT = process.env.B24_TASK_OUT_TOKEN || '';
   if (EXPECT) {
     const ok = (qToken && qToken === EXPECT) || (appToken && appToken === EXPECT);
-    if (!ok) return res.status(403).json({ ok: false, error: 'bad_token' });
+    if (!ok) return { ok: false, action: 'bad_token' };
   }
 
   return await withLock(`task:${taskId}`, async () => {
@@ -180,17 +190,17 @@ async function handleTaskUpdateWebhook(req, res) {
     const bindStr = arr.map(String).find(x => x.startsWith(wantPrefix));
 
     if (!bindStr) {
-      return res.json({
+      return {
         ok: true,
         action: 'skip_not_bound_to_spa1048',
         taskId,
         ufCrmTask: arr,
-      });
+      };
     }
 
     const parsed = parseSpaBinding(bindStr);
     if (!parsed || parsed.entityTypeId !== SPA_ENTITY_TYPE_ID) {
-      return res.json({ ok: true, action: 'skip_wrong_binding', taskId, bind: bindStr });
+      return { ok: true, action: 'skip_wrong_binding', taskId, bind: bindStr };
     }
 
     await writeTaskIdToSpa({ itemId: parsed.itemId, taskId });
@@ -198,13 +208,13 @@ async function handleTaskUpdateWebhook(req, res) {
     const cl = await getChecklist(taskId);
     let deadlineSync = { ok: true, action: 'skipped' };
     try {
+      // DEADLINE содержит дату+время → режем до YYYY-MM-DD
       const taskYmd = dateOnly(task?.deadline || task?.DEADLINE || null);
       deadlineSync = await syncSpaDeadlineFromTask({ itemId: parsed.itemId, taskYmd });
     } catch (e) {
       deadlineSync = { ok: false, action: 'error', error: e?.message || String(e) };
     }
 
-    // логи в ответе
     const base = {
       ok: true,
       taskId,
@@ -214,12 +224,24 @@ async function handleTaskUpdateWebhook(req, res) {
       deadlineSync,
     };
 
-    if (cl.total === 0) return res.json({ ...base, action: 'no_checklist' });
-    if (cl.done < cl.total) return res.json({ ...base, action: 'not_fully_paid' });
+    if (cl.total === 0) return { ...base, action: 'no_checklist' };
+    if (cl.done < cl.total) return { ...base, action: 'not_fully_paid' };
 
     await moveSpaToSuccess(parsed.itemId);
-    return res.json({ ...base, action: 'moved_to_success', stageId: SUCCESS_STAGE });
+    return { ...base, action: 'moved_to_success', stageId: SUCCESS_STAGE };
   });
 }
 
-module.exports = { handleTaskUpdateWebhook };
+// Express-обёртка (для прямого вебхука из Bitrix)
+async function handleTaskUpdateWebhook(req, res) {
+  const result = await processSpa1048TaskUpdate({
+    payload: req?.body || {},
+    query: req?.query || {},
+  });
+  return res.json(result);
+}
+
+module.exports = {
+  handleTaskUpdateWebhook,
+  processSpa1048TaskUpdate,
+};
