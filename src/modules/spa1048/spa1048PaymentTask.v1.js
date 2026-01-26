@@ -71,6 +71,7 @@ async function addTask({ title, description, responsibleId, deadline, crmBinding
     TITLE: String(title || ''),
     RESPONSIBLE_ID: Number(responsibleId || 0),
     DESCRIPTION: String(description || ''),
+    ALLOW_CHANGE_DEADLINE: 'Y',
   };
 
   if (Array.isArray(crmBindings) && crmBindings.length) {

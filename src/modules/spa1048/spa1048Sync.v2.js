@@ -73,17 +73,16 @@ function ymdFromDate(d) {
 
 // ТЗ: если пусто:
 // - если сегодня < 25 -> 25-е текущего месяца
-// - если сегодня >= 25 -> +7 дней от сегодня
-function computeDefaultDeadlineYmd() {
-  const now = new Date();
+// - если сегодня >= 25 -> 25-е следующего месяца
+function computeDefaultDeadlineYmd(now = new Date()) {
   const day = now.getDate();
 
   if (day < 25) {
-    return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-25`;
+    const d = new Date(now.getFullYear(), now.getMonth(), 25);
+    return ymdFromDate(d);
   }
 
-  const d = new Date(now);
-  d.setDate(d.getDate() + 7);
+  const d = new Date(now.getFullYear(), now.getMonth() + 1, 25);
   return ymdFromDate(d);
 }
 
