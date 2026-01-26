@@ -2,6 +2,7 @@ const express = require('express');
 const { httpLogger } = require('./middlewares/requestLogger');
 const errorHandler = require('./middlewares/errorHandler');
 const bitrixRoutes = require('./routes/bitrix.routes');
+const mailRoutes = require('./routes/mail.routes');
 const publicRoutes = require('./routes/public.routes');
 
 const app = express();
@@ -40,6 +41,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 
 // ВАЖНО: временно убрали express-rate-limit, потому что он валит запросы из-за X-Forwarded-For/trust proxy
 app.use('/api/v1/bitrix', bitrixRoutes);
+app.use('/api/v1/mail', mailRoutes);
 
 app.use(errorHandler);
 

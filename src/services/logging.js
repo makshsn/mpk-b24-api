@@ -24,6 +24,7 @@ const FILES = {
   bitrix: 'bitrix.log',    // REST Bitrix
   spa1048: 'spa1048.log',  // бизнес-логика SPA1048
   jobs: 'jobs.log',        // джобы/воркеры
+  mail: 'mail.log',        // интеграция почты
   errors: 'errors.log',    // unhandled/errors middleware
 };
 
