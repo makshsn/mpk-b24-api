@@ -1,6 +1,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
-
+const { getLogger } = require('../logging');
+const bLog = getLogger('bitrix');
 let env = {};
 try { env = require('../../config/env'); } catch (_) {}
 
@@ -66,9 +67,12 @@ function approxBytes(obj) {
   catch (_) { return -1; }
 }
 function logJson(level, event, payload) {
-  const line = JSON.stringify({ ts: nowIso(), level, event, ...payload });
-  if (level === 'error') console.error(line);
-  else console.log(line);
+  const msg = String(event || 'bitrix');
+  const data = { event, ...payload };
+
+  if (level === 'error') bLog.error(data, msg);
+  else if (level === 'warn') bLog.warn(data, msg);
+  else bLog.info(data, msg);
 }
 
 /** -------- form-url-encoding -------- */

@@ -9,16 +9,19 @@ require('dotenv').config({
     : path.join(__dirname, '../../.env'),
 });
 
+const { getLogger } = require('../services/logging');
+const logger = getLogger('jobs');
+
 const { runUrgentToPayOnce } = require('../modules/spa1048/spa1048UrgentToPay');
 
 (async () => {
   try {
     const res = await runUrgentToPayOnce();
-    console.log(JSON.stringify(res, null, 2));
+    logger.info(res, 'spa1048-urgent-run-once result');
     process.exit(0);
   } catch (e) {
-    console.error(e?.message || e);
-    if (e?.data) console.error(JSON.stringify(e.data, null, 2));
+    logger.error({ err: e?.message || e }, 'spa1048-urgent-run-once error');
+    if (e?.data) logger.error({ data: e.data }, 'spa1048-urgent-run-once error.data');
     process.exit(1);
   }
 })();

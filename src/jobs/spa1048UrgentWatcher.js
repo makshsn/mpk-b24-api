@@ -7,8 +7,8 @@ require('dotenv').config({
     ? String(process.env.DOTENV_PATH)
     : path.join(__dirname, '../../.env'),
 });
-
-const { logger } = require('../middlewares/requestLogger');
+const { getLogger } = require('../services/logging');
+const logger = getLogger('jobs');
 const { runUrgentToPayOnce } = require('../modules/spa1048/spa1048UrgentToPay');
 
 // PM2 job: каждые N часов прогоняет счета и переводит в "Срочно к оплате",

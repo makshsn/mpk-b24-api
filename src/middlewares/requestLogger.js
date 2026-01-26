@@ -1,16 +1,14 @@
-const pino = require('pino');
+'use strict';
+
 const pinoHttp = require('pino-http');
-const fs = require('fs');
+const { getLogger } = require('../services/logging');
 
-if (!fs.existsSync('logs')) fs.mkdirSync('logs');
+const logger = getLogger('app');
 
-const streams = [
-  { stream: pino.destination({ dest: 'logs/app.log', sync: false }) },
-];
-
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' }, pino.multistream(streams));
+// pino-http использует переданный pino instance как базовый логгер :contentReference[oaicite:4]{index=4}
+const httpLogger = pinoHttp({ logger });
 
 module.exports = {
   logger,
-  httpLogger: pinoHttp({ logger }),
+  httpLogger,
 };

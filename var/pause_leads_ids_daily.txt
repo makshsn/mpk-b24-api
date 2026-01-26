@@ -1,5 +1,5 @@
-[dotenv@17.2.3] injecting env (33) from .env -- tip: 🔐 encrypt with Dotenvx: https://dotenvx.com
-PAUSE=UC_79QMBF count=81
+[dotenv@17.2.3] injecting env (34) from .env -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
+PAUSE=UC_79QMBF count=83
 206
 214
 222
@@ -27,7 +27,6 @@ PAUSE=UC_79QMBF count=81
 562
 610
 644
-648
 672
 674
 696
@@ -41,14 +40,12 @@ PAUSE=UC_79QMBF count=81
 874
 880
 926
-960
 1052
 1118
 1140
 1168
 1194
 1198
-1200
 1270
 1288
 1300
@@ -69,6 +66,8 @@ PAUSE=UC_79QMBF count=81
 1566
 1580
 1586
+1604
+1644
 1684
 1698
 1726
@@ -80,4 +79,7 @@ PAUSE=UC_79QMBF count=81
 1764
 1792
 1842
-1854
+1932
+1938
+1940
+1946

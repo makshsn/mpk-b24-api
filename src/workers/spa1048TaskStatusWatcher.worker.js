@@ -1,5 +1,8 @@
 'use strict';
 
+const { getLogger } = require('../services/logging');
+const logger = getLogger('jobs');
+
 const bitrix = require('../services/bitrix/bitrixClient');
 const cfg = require('../config/spa1048');
 
@@ -117,7 +120,7 @@ async function runOnce() {
           task = await getTask(taskId);
         } catch (e) {
           stats.errors++;
-          console.log('[spa1048-task-status] task.get error', { itemId, taskId, err: String(e?.message || e) });
+          logger.warn({ itemId, taskId, err: String(e?.message || e) }, '[spa1048-task-status] task.get error');
           continue;
         }
 
@@ -135,10 +138,10 @@ async function runOnce() {
         try {
           await updateStage(itemId);
           stats.updated++;
-          console.log('[spa1048-task-status] updated', { itemId, taskId, to: STAGE_PAID });
+          logger.info({ itemId, taskId, to: STAGE_PAID }, '[spa1048-task-status] updated');
         } catch (e) {
           stats.errors++;
-          console.log('[spa1048-task-status] item.update error', { itemId, taskId, err: String(e?.message || e) });
+          logger.error({ itemId, taskId, err: String(e?.message || e) }, '[spa1048-task-status] item.update error');
         }
       }
 
@@ -148,15 +151,15 @@ async function runOnce() {
     }
   } catch (e) {
     stats.errors++;
-    console.log('[spa1048-task-status] fatal error', { err: String(e?.message || e) });
+    logger.error({ err: String(e?.message || e) }, '[spa1048-task-status] fatal error');
   } finally {
-    console.log('[spa1048-task-status] done', stats);
+    logger.info(stats, '[spa1048-task-status] done');
     running = false;
   }
 }
 
 async function main() {
-  console.log('[spa1048-task-status] started', {
+  logger.info({
     entityTypeId: ENTITY_TYPE_ID,
     paidStage: STAGE_PAID,
     finalStages: FINAL_STAGES,
@@ -165,7 +168,7 @@ async function main() {
     intervalMs: INTERVAL_MS,
     pageSize: PAGE_SIZE,
     maxPages: MAX_PAGES,
-  });
+  }, '[spa1048-task-status] started');
 
   // запуск сразу
   await runOnce();
@@ -177,7 +180,7 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error('[spa1048-task-status] crash', e);
+  logger.fatal({ err: e }, '[spa1048-task-status] crash');
   process.exit(1);
 });
 //http://mpk-b24-webhooks.online/b24/task-event
