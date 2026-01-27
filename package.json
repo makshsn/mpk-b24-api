@@ -19,6 +19,7 @@
     "express-rate-limit": "^8.2.1",
     "form-data": "^4.0.0",
     "imapflow": "^1.2.6",
+    "mailparser": "^3.9.1",
     "pino": "^10.1.0",
     "pino-http": "^11.0.0",
     "rotating-file-stream": "^3.2.7",

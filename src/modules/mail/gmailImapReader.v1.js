@@ -38,10 +38,7 @@ function createClient() {
       host: cfg.host,
       port: cfg.port,
       secure: cfg.secure,
-      auth: {
-        user: cfg.user,
-        pass: cfg.pass,
-      },
+      auth: { user: cfg.user, pass: cfg.pass },
       logger: false,
       disableAutoEnable: true,
     }),
@@ -60,17 +57,12 @@ async function withImapClient(fn) {
       lock.release();
     }
   } finally {
-    try {
-      await client.logout();
-    } catch (e) {
-      // ignore
-    }
+    try { await client.logout(); } catch (_) {}
   }
 }
 
 function normalizeEnvelope(env) {
   const subject = String(env?.subject || '').trim();
-
   const fromAddr = env?.from?.[0]?.address || '';
   const fromName = env?.from?.[0]?.name || '';
   const from =
@@ -80,23 +72,24 @@ function normalizeEnvelope(env) {
   const messageId = String(env?.messageId || '').trim();
   const date = env?.date ? new Date(env.date).toISOString() : null;
 
-  return { subject, from, messageId, date };
+  return { subject, from, messageId, date, fromAddr: String(fromAddr).trim().toLowerCase() };
 }
 
-/**
- * Читает непрочитанные письма из выбранного mailbox.
- * Возвращает метаданные + (опционально) raw source.
- */
-async function fetchUnreadEmails(opts = {}) {
-  const includeSource = envBool('GMAIL_IMAP_INCLUDE_SOURCE', false);
+async function testImapConnection() {
+  return withImapClient(async ({ client, cfg }) => {
+    const status = await client.status(cfg.mailbox, { messages: true, unseen: true });
+    return { ok: true, mailbox: cfg.mailbox, status };
+  });
+}
+
+async function listUnreadEmails(opts = {}) {
   const limit = Math.max(1, Math.min(50, Number(opts.limit || 0) || 0)) || null;
 
   return withImapClient(async ({ client, cfg }) => {
     const fetchLimit = limit || cfg.fetchLimit;
 
-    // Gmail: непрочитанные
     const uids = await client.search({ seen: false });
-    const picked = uids.slice(-fetchLimit); // последние N
+    const picked = uids.slice(-fetchLimit);
 
     const out = [];
     for await (const msg of client.fetch(picked, {
@@ -104,32 +97,18 @@ async function fetchUnreadEmails(opts = {}) {
       envelope: true,
       flags: true,
       size: true,
-      source: includeSource,
     })) {
       const env = normalizeEnvelope(msg.envelope);
-
-      const item = {
+      out.push({
         uid: msg.uid,
         flags: Array.isArray(msg.flags) ? msg.flags : [],
         size: Number(msg.size || 0),
-        ...env,
-      };
-
-      if (includeSource && msg.source) {
-        item.source = Buffer.isBuffer(msg.source) ? msg.source.toString('utf8') : String(msg.source);
-      }
-
-      out.push(item);
-    }
-
-    // помечаем как прочитанные
-    if (cfg.markSeen && out.length) {
-      const toMark = out.map((x) => x.uid).filter(Boolean);
-      try {
-        await client.messageFlagsAdd(toMark, ['\\Seen'], { uid: true });
-      } catch (e) {
-        logger.warn({ err: e?.message, count: toMark.length }, '[mail][imap] failed to mark as seen');
-      }
+        subject: env.subject,
+        from: env.from,
+        fromAddr: env.fromAddr,
+        messageId: env.messageId,
+        date: env.date,
+      });
     }
 
     return {
@@ -137,29 +116,88 @@ async function fetchUnreadEmails(opts = {}) {
       mailbox: cfg.mailbox,
       totalUnseen: uids.length,
       returned: out.length,
-      markSeen: cfg.markSeen,
-      includeSource,
       items: out,
     };
   });
 }
 
 /**
- * Быстрая проверка коннекта, полезно для health-check.
+ * Забрать RAW source (RFC822) по UID (или списку UID)
  */
-async function testImapConnection() {
+async function fetchRawByUids(uids) {
+  const list = (Array.isArray(uids) ? uids : [uids]).map((x) => Number(x)).filter(Boolean);
+  if (!list.length) throw new Error('uids required');
+
   return withImapClient(async ({ client, cfg }) => {
-    const status = await client.status(cfg.mailbox, { messages: true, unseen: true });
+    const out = [];
+    for await (const msg of client.fetch(list, {
+      uid: true,
+      envelope: true,
+      source: true,
+      size: true,
+      flags: true,
+    })) {
+      const env = normalizeEnvelope(msg.envelope);
+      const raw = Buffer.isBuffer(msg.source) ? msg.source : Buffer.from(msg.source || '', 'utf8');
+
+      out.push({
+        uid: msg.uid,
+        envelope: msg.envelope || null,
+        normalized: env,
+        size: Number(msg.size || 0),
+        flags: Array.isArray(msg.flags) ? msg.flags : [],
+        raw,
+      });
+    }
+
     return {
       ok: true,
       mailbox: cfg.mailbox,
-      status,
+      items: out,
     };
+  });
+}
+
+async function markSeenByUids(uids) {
+  const list = (Array.isArray(uids) ? uids : [uids]).map((x) => Number(x)).filter(Boolean);
+  if (!list.length) return { ok: true, skipped: 'no_uids' };
+
+  return withImapClient(async ({ client }) => {
+    await client.messageFlagsAdd(list, ['\\Seen'], { uid: true });
+    return { ok: true, count: list.length };
+  });
+}
+
+/**
+ * Gmail labels (X-GM-LABELS). Работает на Gmail/Google Workspace.
+ * Если метод недоступен — просто игнорируем.
+ */
+async function addLabelByUids(uids, label) {
+  const lbl = String(label || '').trim();
+  if (!lbl) return { ok: true, skipped: 'no_label' };
+
+  const list = (Array.isArray(uids) ? uids : [uids]).map((x) => Number(x)).filter(Boolean);
+  if (!list.length) return { ok: true, skipped: 'no_uids' };
+
+  return withImapClient(async ({ client }) => {
+    if (typeof client.messageLabelsAdd !== 'function') {
+      return { ok: true, skipped: 'labels_not_supported' };
+    }
+    try {
+      await client.messageLabelsAdd(list, [lbl], { uid: true });
+      return { ok: true, count: list.length, label: lbl };
+    } catch (e) {
+      logger.warn({ err: e?.message, label: lbl }, '[mail][imap] add label failed');
+      return { ok: false, error: e?.message, label: lbl };
+    }
   });
 }
 
 module.exports = {
   getImapConfig,
   testImapConnection,
-  fetchUnreadEmails,
+  listUnreadEmails,
+  fetchRawByUids,
+  markSeenByUids,
+  addLabelByUids,
 };

@@ -1,13 +1,35 @@
 const router = require('express').Router();
 
-const authWebhook = require('../middlewares/authWebhook');
-const { imapTest, imapUnseen } = require('../controllers/mailImap.controller');
+// Без токена/авторизации (по вашей установке). Ограничьте доступ на уровне Nginx.
 
-// Доступ только по WEBHOOK_TOKEN (query token или x-webhook-token)
-router.get('/imap/test', authWebhook, imapTest);
-router.post('/imap/test', authWebhook, imapTest);
+const {
+  imapTest,
+  imapUnseen,
+  imapIngest,
+  getSavedEmail,
+} = require('../controllers/mailImap.controller');
 
-router.get('/imap/unseen', authWebhook, imapUnseen);
-router.post('/imap/unseen', authWebhook, imapUnseen);
+const { createFromEmail } = require('../controllers/mailSpa1048.controller');
+const { run: autoRunOnce } = require('../controllers/mailSpa1048Auto.controller');
+
+// IMAP
+router.get('/imap/test', imapTest);
+router.post('/imap/test', imapTest);
+
+router.get('/imap/unseen', imapUnseen);
+router.post('/imap/unseen', imapUnseen);
+
+router.get('/imap/ingest', imapIngest);
+router.post('/imap/ingest', imapIngest);
+
+router.get('/imap/email/:id', getSavedEmail);
+
+// Создать SPA1048 из сохранённого письма (emailId)
+router.get('/spa1048/from-email/:emailId', createFromEmail);
+router.post('/spa1048/from-email/:emailId', createFromEmail);
+
+// Авто-конвертация: непрочитанные -> allowlist -> SPA1048
+router.get('/spa1048/auto/run-once', autoRunOnce);
+router.post('/spa1048/auto/run-once', autoRunOnce);
 
 module.exports = router;
