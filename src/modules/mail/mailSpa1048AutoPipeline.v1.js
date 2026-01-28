@@ -2,7 +2,7 @@
 
 const { listUnreadEmails, fetchRawByUids, markSeenByUids, addLabelByUids } = require('./gmailImapReader.v1');
 const { parseRawEmail } = require('./emailMimeParser.v1');
-const { saveEmailRecord } = require('./mailStore.v1');
+const { saveEmailRecord, acquireLock, releaseLock } = require('./mailStore.v1');
 const { createSpa1048FromStoredEmail } = require('../spa1048/spa1048CreateFromStoredEmail.v1');
 const { getLogger } = require('../../services/logging');
 
@@ -28,8 +28,16 @@ function parseAllowlist() {
 }
 
 async function runOnce({ limit = 10 } = {}) {
+  // Глобальный lock: защищает от параллельных запусков (pm2 cluster, job+ручной запуск и т.п.)
+  const globalLock = acquireLock('mail:spa1048:auto:runOnce', Number(process.env.MAIL_AUTO_LOCK_TTL_MS || 5 * 60 * 1000));
+  if (!globalLock.ok) return { ok: false, error: globalLock.error || 'auto_lock_failed' };
+  if (!globalLock.acquired) {
+    return { ok: true, skipped: 'already_running', reason: globalLock.reason || 'locked' };
+  }
+
   const allow = parseAllowlist();
   if (!allow.size) {
+    releaseLock(globalLock);
     return { ok: false, error: 'MAIL_ALLOWED_FROM is empty (allowlist required)' };
   }
 
@@ -55,6 +63,7 @@ async function runOnce({ limit = 10 } = {}) {
   }
 
   if (!allowed.length) {
+    releaseLock(globalLock);
     return {
       ok: true,
       totalUnseen: listed.totalUnseen,
@@ -72,6 +81,18 @@ async function runOnce({ limit = 10 } = {}) {
   for (const msg of rawBatch.items || []) {
     const uid = msg.uid;
     const senderEmail = String(msg?.normalized?.fromAddr || '').toLowerCase();
+
+    // Lock на конкретное письмо (mailbox+uid) — защита от гонок при параллельном runOnce.
+    const mailKey = `mail:${rawBatch.mailbox || 'INBOX'}:uid:${uid}`;
+    const mailLock = acquireLock(mailKey, Number(process.env.MAIL_UID_LOCK_TTL_MS || 10 * 60 * 1000));
+    if (!mailLock.ok) {
+      results.push({ ok: false, uid, senderEmail, error: mailLock.error || 'mail_lock_failed' });
+      continue;
+    }
+    if (!mailLock.acquired) {
+      results.push({ ok: true, uid, senderEmail, skipped: 'locked_already_processing' });
+      continue;
+    }
 
     try {
       const parsed = await parseRawEmail(msg.raw);
@@ -98,9 +119,12 @@ async function runOnce({ limit = 10 } = {}) {
       const err = e?.message || String(e);
       logger.error({ uid, senderEmail, err }, '[mail][auto] failed to create spa from email');
       results.push({ ok: false, uid, senderEmail, error: err });
+    } finally {
+      releaseLock(mailLock);
     }
   }
 
+  releaseLock(globalLock);
   return {
     ok: true,
     totalUnseen: listed.totalUnseen,

@@ -392,11 +392,67 @@ async function createSpa1048FromStoredEmail({ emailId, senderEmail }) {
   const fieldCamel = cfg.filesFieldCamel || 'ufCrm8_1768219060503';
 
   const rec = await loadEmailRecord(emailId);
-  const title = buildTitleFromSubject(rec?.subject);
-  const createdAt = nowIso();
 
-  const mappedUserId = resolveUserIdBySenderEmail(senderEmail || rec?.envelope?.fromAddr || '');
-  const supportedFields = await getSpaSupportedFields(entityTypeId);
+  // Идемпотентность: если это письмо уже было конвертировано в SPA — ничего не создаём повторно.
+  if (rec?.processedTo?.itemId) {
+    const itemId = toNum(rec.processedTo.itemId);
+    logger.info({ emailId, itemId }, '[spa1048][email] already processed');
+    return {
+      ok: true,
+      emailId,
+      itemId,
+      title: rec?.subject ? buildTitleFromSubject(rec.subject) : 'Счёт (из письма)',
+      mappedUserId: rec?.processedUserId || null,
+      upload: { ok: true, skipped: 'already_processed' },
+      skippedAttachments: [],
+      pruned: { ok: true, mode: 'already_processed' },
+      alreadyProcessed: true,
+    };
+  }
+
+  // Lock на время создания SPA из письма — защита от гонок, если письмо попало в обработку дважды.
+  const lockTtlMs = Number(process.env.MAIL_EMAIL_LOCK_TTL_MS || 15 * 60 * 1000);
+  const lockFile = path.join(emailRootDir(emailId), '.processing.lock');
+  let lockHeld = false;
+  try {
+    await fsp.mkdir(path.dirname(lockFile), { recursive: true });
+    const fh = await fsp.open(lockFile, 'wx');
+    await fh.writeFile(JSON.stringify({ emailId, pid: process.pid, at: nowIso() }, null, 2), 'utf8');
+    await fh.close();
+    lockHeld = true;
+  } catch (e) {
+    // lock exists: если очень старый — считаем stale и перезахватываем
+    if (e && e.code === 'EEXIST') {
+      try {
+        const st = await fsp.stat(lockFile);
+        const age = Date.now() - Number(st.mtimeMs || 0);
+        if (lockTtlMs > 0 && age > lockTtlMs) {
+          try { await fsp.unlink(lockFile); } catch (_) {}
+          const fh = await fsp.open(lockFile, 'wx');
+          await fh.writeFile(JSON.stringify({ emailId, pid: process.pid, at: nowIso(), staleRecovered: true }, null, 2), 'utf8');
+          await fh.close();
+          lockHeld = true;
+        } else {
+          // в обработке другим процессом/потоком — пробуем перечитать запись, вдруг уже успели поставить processedTo
+          const rec2 = await loadEmailRecord(emailId);
+          if (rec2?.processedTo?.itemId) {
+            const itemId = toNum(rec2.processedTo.itemId);
+            return { ok: true, emailId, itemId, mappedUserId: rec2?.processedUserId || null, alreadyProcessed: true };
+          }
+          throw new Error('email_is_processing');
+        }
+      } catch (err) {
+        throw err;
+      }
+    }
+    throw e;
+  }
+  try {
+    const title = buildTitleFromSubject(rec?.subject);
+    const createdAt = nowIso();
+
+    const mappedUserId = resolveUserIdBySenderEmail(senderEmail || rec?.envelope?.fromAddr || '');
+    const supportedFields = await getSpaSupportedFields(entityTypeId);
 
   const fieldsForAdd = {
     title,
@@ -414,72 +470,77 @@ async function createSpa1048FromStoredEmail({ emailId, senderEmail }) {
     fieldsForAdd.createdById = mappedUserId;
   }
 
-  const addRes = await bitrix.call('crm.item.add', {
+    const addRes = await bitrix.call('crm.item.add', {
     entityTypeId,
     fields: fieldsForAdd,
   }, { ctx: { step: 'crm_item_add_spa1048_from_email', emailId, mappedUserId } });
 
-  const item = addRes?.item || addRes?.result?.item || addRes?.result || addRes;
-  const itemId = toNum(item?.id || item?.ID);
-  if (!itemId) throw new Error('cannot_extract_spa_itemId');
+    const item = addRes?.item || addRes?.result?.item || addRes?.result || addRes;
+    const itemId = toNum(item?.id || item?.ID);
+    if (!itemId) throw new Error('cannot_extract_spa_itemId');
 
-  const readRes = await readAttachmentsFromStore(rec, emailId);
-  let files = readRes.ok;
+    const readRes = await readAttachmentsFromStore(rec, emailId);
+    let files = readRes.ok;
 
-  const bodyFile = buildBodyFileIfNeeded(rec);
-  if (bodyFile) files.push(bodyFile);
+    const bodyFile = buildBodyFileIfNeeded(rec);
+    if (bodyFile) files.push(bodyFile);
 
-  const limited = enforceSizeLimits(files);
-  files = limited.ok;
+    const limited = enforceSizeLimits(files);
+    files = limited.ok;
 
-  const skippedAll = [...(readRes.skipped || []), ...(limited.skipped || [])];
+    const skippedAll = [...(readRes.skipped || []), ...(limited.skipped || [])];
 
-  const uploadRes = await updateUfFilesReplace({
+    const uploadRes = await updateUfFilesReplace({
     entityTypeId,
     itemId,
     fieldCamel,
     uploadList: files,
   });
 
-  const timelineText = formatEmailTextForTimeline(rec, skippedAll);
-  const parts = chunkText(timelineText, 3500);
-  for (let i = 0; i < parts.length; i++) {
-    await addSpaTimelineComment({
-      entityTypeId,
-      entityId: itemId,
-      text: i === 0 ? parts[i] : `Продолжение (${i + 1}/${parts.length})\n${parts[i]}`,
-    });
+    const timelineText = formatEmailTextForTimeline(rec, skippedAll);
+    const parts = chunkText(timelineText, 3500);
+    for (let i = 0; i < parts.length; i++) {
+      await addSpaTimelineComment({
+        entityTypeId,
+        entityId: itemId,
+        text: i === 0 ? parts[i] : `Продолжение (${i + 1}/${parts.length})\n${parts[i]}`,
+      });
+    }
+
+    const keepTextMinimal = envBool('MAIL_STORE_KEEP_TEXT_MINIMAL', true);
+
+    const updated = {
+      ...rec,
+      processedAt: nowIso(),
+      processedTo: { entityTypeId, itemId },
+      processedUserId: mappedUserId || null,
+    };
+
+    if (keepTextMinimal) {
+      updated.html = '';
+      if (updated.text && updated.text.length > 5000) updated.text = `${updated.text.slice(0, 5000)}\n\n[...cut...]`;
+    }
+
+    await saveEmailRecord(emailId, updated);
+    const pruneRes = await pruneLocalStoreAfterProcess(emailId, true);
+
+    logger.info({ emailId, itemId, uploadRes, pruned: pruneRes.mode, mappedUserId }, '[spa1048][email] created');
+
+    return {
+      ok: true,
+      emailId,
+      itemId,
+      title,
+      mappedUserId: mappedUserId || null,
+      upload: uploadRes,
+      skippedAttachments: skippedAll,
+      pruned: pruneRes,
+    };
+  } finally {
+    if (lockHeld) {
+      try { await fsp.unlink(lockFile); } catch (_) {}
+    }
   }
-
-  const keepTextMinimal = envBool('MAIL_STORE_KEEP_TEXT_MINIMAL', true);
-
-  const updated = {
-    ...rec,
-    processedAt: nowIso(),
-    processedTo: { entityTypeId, itemId },
-    processedUserId: mappedUserId || null,
-  };
-
-  if (keepTextMinimal) {
-    updated.html = '';
-    if (updated.text && updated.text.length > 5000) updated.text = `${updated.text.slice(0, 5000)}\n\n[...cut...]`;
-  }
-
-  await saveEmailRecord(emailId, updated);
-  const pruneRes = await pruneLocalStoreAfterProcess(emailId, true);
-
-  logger.info({ emailId, itemId, uploadRes, pruned: pruneRes.mode, mappedUserId }, '[spa1048][email] created');
-
-  return {
-    ok: true,
-    emailId,
-    itemId,
-    title,
-    mappedUserId: mappedUserId || null,
-    upload: uploadRes,
-    skippedAttachments: skippedAll,
-    pruned: pruneRes,
-  };
 }
 
 module.exports = {

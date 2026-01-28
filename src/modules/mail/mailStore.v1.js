@@ -26,8 +26,74 @@ function nowIso() {
 }
 
 function buildId({ mailbox, uid, messageId }) {
-  const base = `${mailbox || 'INBOX'}:${uid || ''}:${messageId || ''}:${Date.now()}`;
+  // ВАЖНО: ID должен быть детерминированным, иначе одно и то же письмо может
+  // обработаться дважды и получить разные emailId -> дубль SPA.
+  // Ключ: mailbox + uid + messageId (если есть). UID в рамках mailbox стабильный.
+  const base = `${mailbox || 'INBOX'}:${uid || ''}:${messageId || ''}`;
   return sha1(Buffer.from(base)).slice(0, 16);
+}
+
+function lockDir() {
+  return path.join(storeDir(), 'locks');
+}
+
+function lockPath(key) {
+  const safe = sha1(Buffer.from(String(key || ''))).slice(0, 24);
+  return path.join(lockDir(), `${safe}.lock`);
+}
+
+function acquireLock(key, ttlMs = 10 * 60 * 1000) {
+  const p = lockPath(key);
+  ensureDir(path.dirname(p));
+
+  const now = Date.now();
+
+  try {
+    // atomic create
+    const fd = fs.openSync(p, 'wx');
+    try {
+      fs.writeFileSync(fd, JSON.stringify({ key, pid: process.pid, at: nowIso(), ts: now }), 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { ok: true, acquired: true, path: p };
+  } catch (e) {
+    if (e && e.code !== 'EEXIST') {
+      return { ok: false, acquired: false, path: p, error: e?.message || String(e) };
+    }
+
+    // lock exists: check TTL
+    try {
+      const st = fs.statSync(p);
+      const age = now - Number(st.mtimeMs || 0);
+      if (ttlMs > 0 && age > ttlMs) {
+        // stale lock
+        try { fs.unlinkSync(p); } catch (_) {}
+        // retry once
+        const fd = fs.openSync(p, 'wx');
+        try {
+          fs.writeFileSync(fd, JSON.stringify({ key, pid: process.pid, at: nowIso(), ts: now, staleRecovered: true }), 'utf8');
+        } finally {
+          fs.closeSync(fd);
+        }
+        return { ok: true, acquired: true, path: p, staleRecovered: true };
+      }
+      return { ok: true, acquired: false, path: p, reason: 'locked' };
+    } catch (err) {
+      return { ok: true, acquired: false, path: p, reason: 'locked_stat_failed', error: err?.message || String(err) };
+    }
+  }
+}
+
+function releaseLock(lock) {
+  const p = typeof lock === 'string' ? lock : lock?.path;
+  if (!p) return { ok: true, skipped: 'no_path' };
+  try {
+    fs.unlinkSync(p);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
 }
 
 function writeJson(file, obj) {
@@ -54,6 +120,17 @@ function attachDir(id) {
 
 function saveEmailRecord({ mailbox, uid, messageId, envelope, parsed, rawBuffer }) {
   const id = buildId({ mailbox, uid, messageId });
+
+  // Если уже есть запись (детерминированный id) — возвращаем её.
+  // Это базовая идемпотентность на уровне письма.
+  const existingFile = emailPath(id);
+  if (fs.existsSync(existingFile)) {
+    try {
+      return readJson(existingFile);
+    } catch (_) {
+      // если json битый — продолжим пересоздание
+    }
+  }
 
   const baseDir = path.dirname(emailPath(id));
   ensureDir(baseDir);
@@ -159,4 +236,6 @@ module.exports = {
   saveEmailRecord,
   loadEmailRecord,
   cleanupOldEmails,
+  acquireLock,
+  releaseLock,
 };

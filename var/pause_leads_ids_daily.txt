@@ -1,4 +1,4 @@
-[dotenv@17.2.3] injecting env (45) from .env -- tip: 📡 add observability to secrets: https://dotenvx.com/ops
+[dotenv@17.2.3] injecting env (60) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
 PAUSE=UC_79QMBF count=78
 206
 214
@@ -77,4 +77,4 @@ PAUSE=UC_79QMBF count=78
 1938
 1940
 1946
-1974
+1994
