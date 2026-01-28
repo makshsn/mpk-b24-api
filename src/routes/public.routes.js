@@ -1,6 +1,7 @@
 const express = require('express');
 
 const { spaEvent } = require("../controllers/spa1048.controller");
+const { spaDeleteWebhook } = require("../controllers/spa1048DeleteWebhook.controller");
 const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.controller");
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
 const { taskCloseWebhook } = require("../controllers/taskCloseWebhook.controller");
@@ -32,6 +33,13 @@ router.use((req, res, next) => {
 // Bitrix outbound events
 router.post('/spa-event', spaEvent);
 router.get('/spa-event', spaEvent);
+
+// Bitrix outbound: SPA deleted (onCrmDynamicItemDelete)
+router.post('/spa-delete', spaDeleteWebhook);
+router.get('/spa-delete', spaDeleteWebhook);
+// удобный ручной тест: /b24/spa-delete/134?debug=1
+router.post('/spa-delete/:itemId', spaDeleteWebhook);
+router.get('/spa-delete/:itemId', spaDeleteWebhook);
 
 router.post('/task-event', taskCompletionEvent);
 router.get('/task-event', taskCompletionEvent);

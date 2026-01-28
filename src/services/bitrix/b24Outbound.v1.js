@@ -76,8 +76,11 @@ function deepFindFirstInt(obj, wantedKeys, maxDepth = 6) {
 
 function extractSpaItemId(req) {
   const b = ensureObjectBody(req);
-  // сначала стандартные пути
+
+  // 1) query/params/body стандартные варианты
   const candidates = [
+    req?.params?.itemId,
+    req?.params?.id,
     req?.query?.itemId,
     req?.query?.id,
     b?.itemId,
@@ -94,7 +97,16 @@ function extractSpaItemId(req) {
     const n = Number(String(v).trim());
     if (Number.isFinite(n) && n > 0) return n;
   }
-  // fallback: глубокий поиск ID
+
+  // 2) если itemId передан прямо в URL как /.../123
+  const u = String(req?.originalUrl || req?.url || '');
+  const m = u.match(/(?:^|\/)(\d+)(?:\?.*)?$/);
+  if (m && m[1]) {
+    const n = Number(m[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+
+  // 3) fallback: глубокий поиск ID
   return deepFindFirstInt(b, ['ID', 'id']);
 }
 
