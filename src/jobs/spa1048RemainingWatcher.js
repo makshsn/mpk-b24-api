@@ -1,8 +1,5 @@
 const path = require('path');
 
-// Джоба: каждую минуту пересчитывает поле "Остаток к оплате" в SPA1048
-// Формула: total - paid = remain
-
 require('dotenv').config({
   path: process.env.DOTENV_PATH
     ? String(process.env.DOTENV_PATH)
@@ -23,9 +20,9 @@ async function tick() {
 
   try {
     const res = await runRemainingToPayOnce({ limit: updateLimit });
-    logger.info({ res }, '[spa1048][remain] tick ok');
+    logger.info({ res }, '[spa1048][remaining] tick ok');
   } catch (e) {
-    logger.error({ err: e?.message, data: e?.data }, '[spa1048][remain] tick failed');
+    logger.error({ err: e?.message, data: e?.data }, '[spa1048][remaining] tick failed');
   }
 }
 
@@ -33,7 +30,7 @@ process.on('unhandledRejection', (e) => logger.error({ err: String(e) }, 'unhand
 process.on('uncaughtException', (e) => logger.error({ err: String(e) }, 'uncaughtException'));
 
 (async () => {
-  logger.info({ enabled, intervalSec, updateLimit }, '[spa1048][remain] watcher started');
+  logger.info({ enabled, intervalSec, updateLimit }, '[spa1048][remaining] watcher started');
   await tick();
   setInterval(tick, intervalSec * 1000);
 })();

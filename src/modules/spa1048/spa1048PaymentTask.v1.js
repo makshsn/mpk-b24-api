@@ -66,13 +66,57 @@ function extractFileIdFromTitle(title) {
   return match ? toNum(match[1]) : 0;
 }
 
-async function addTask({ title, description, responsibleId, deadline, crmBindings }) {
+/**
+ * Наблюдатели для снабжения:
+ * если постановщик (CREATED_BY) = 72 или 74, то добавляем второго из пары в AUDITORS.
+ *
+ * Можно переопределить через env:
+ * SPA1048_SUPPLY_AUDITORS="72,74"
+ */
+function getSupplyAuditorsConfig() {
+  const raw = String(process.env.SPA1048_SUPPLY_AUDITORS || '72,74');
+  const ids = raw
+    .split(',')
+    .map((x) => toNum(String(x).trim()))
+    .filter((n) => n > 0);
+  // ожидаем ровно 2, но если будет больше — тоже ок
+  return Array.from(new Set(ids));
+}
+
+function buildSupplyAuditors(createdById) {
+  const supply = getSupplyAuditorsConfig();
+  const cb = toNum(createdById);
+  if (!cb) return null;
+
+  if (!supply.includes(cb)) return null;
+
+  // "в зависимости от того, кого не хватает" — добавляем только второго(ых)
+  const auditorsToAdd = supply.filter((id) => id !== cb);
+  return auditorsToAdd.length ? auditorsToAdd : null;
+}
+
+/**
+ * ВАЖНО:
+ * - CREATED_BY пытаемся поставить, но Bitrix может запретить это правами.
+ * - Поэтому делаем fallback: повторяем tasks.task.add без CREATED_BY.
+ */
+async function addTask({ title, description, responsibleId, createdById, deadline, crmBindings }) {
   const fields = {
     TITLE: String(title || ''),
     RESPONSIBLE_ID: Number(responsibleId || 0),
     DESCRIPTION: String(description || ''),
     ALLOW_CHANGE_DEADLINE: 'Y',
   };
+
+  if (createdById) {
+    fields.CREATED_BY = Number(createdById);
+  }
+
+  // ✅ Наблюдатели (AUDITORS) для снабжения, если постановщик 72/74
+  const supplyAuditors = buildSupplyAuditors(createdById);
+  if (supplyAuditors && supplyAuditors.length) {
+    fields.AUDITORS = supplyAuditors.map((x) => Number(x));
+  }
 
   if (Array.isArray(crmBindings) && crmBindings.length) {
     fields.UF_CRM_TASK = crmBindings;
@@ -81,7 +125,24 @@ async function addTask({ title, description, responsibleId, deadline, crmBinding
   // DEADLINE опционально
   if (deadline) fields.DEADLINE = String(deadline);
 
-  const r = await bitrix.call('tasks.task.add', { fields }, { ctx: { step: 'task_add' } });
+  let r;
+  try {
+    r = await bitrix.call('tasks.task.add', { fields }, { ctx: { step: 'task_add' } });
+  } catch (e) {
+    // fallback только если реально пробовали CREATED_BY
+    if (!fields.CREATED_BY) throw e;
+
+    const errMsg = e?.message || String(e);
+    const fields2 = { ...fields };
+    delete fields2.CREATED_BY;
+
+    r = await bitrix.call(
+      'tasks.task.add',
+      { fields: fields2 },
+      { ctx: { step: 'task_add_retry_no_created_by', error: errMsg } }
+    );
+  }
+
   const t = r?.task || r?.result?.task || r?.result;
   const taskId = toNum(t?.id || t?.ID);
   if (!taskId) throw new Error('[spa1048] tasks.task.add: cannot extract taskId');
@@ -112,7 +173,7 @@ async function setSpaTaskId({ entityTypeId, itemId, taskId }) {
   await bitrix.call('crm.item.update', {
     entityTypeId: Number(entityTypeId),
     id: Number(itemId),
-    fields: { [taskIdField]: Number(taskId) , ufCrm8TaskId: Number(taskId) },
+    fields: { [taskIdField]: Number(taskId), ufCrm8TaskId: Number(taskId) },
   }, { ctx: { step: 'crm_set_task_id', itemId, taskId, taskIdField } });
 }
 
@@ -338,6 +399,7 @@ async function createPaymentTaskIfMissing({
   fileNames,
   pdfNames,
   responsibleId,
+  createdById,
   stageId,
 }) {
   const existingTaskId = toNum(taskId);
@@ -393,7 +455,15 @@ async function createPaymentTaskIfMissing({
 
   const typeHex = Number(entityTypeId).toString(16); // SPA binding требует HEX typeId
   const crmBindings = [`T${typeHex}_${itemId}`];
-  const newTaskId = await addTask({ title, description, responsibleId, deadline, crmBindings });
+
+  const newTaskId = await addTask({
+    title,
+    description,
+    responsibleId,
+    createdById,
+    deadline,
+    crmBindings
+  });
 
   await setSpaTaskId({ entityTypeId, itemId, taskId: newTaskId });
 
@@ -412,7 +482,6 @@ function buildPaymentTaskDescription({ itemId, fileNames }) {
   const files = uniq(fileNames)
     .map((x) => String(x || '').trim())
     .filter(Boolean)
-    // на всякий случай отбрасываем папки (если вдруг прилетят)
     .filter((x) => !x.endsWith('/') && !x.endsWith('\\'));
   const descrLines = [
     `Оплата всех файлов по счёту/заказу SPA(1048) #${itemId}.`,
@@ -449,17 +518,6 @@ function areSameNameSets(a = [], b = []) {
   return true;
 }
 
-function countPdfLinesInDescription(description) {
-  const text = String(description || '');
-  const lines = text.split(/\r?\n/);
-  let count = 0;
-  for (const ln of lines) {
-    // считаем нумерованные строки (1. ..., 2. ...), вне зависимости от расширения
-    if (/^\s*\d+\.\s*(.+?)\s*$/.test(String(ln || ''))) count++;
-  }
-  return count;
-}
-
 async function getTaskFull(taskId) {
   const r = await bitrix.call('tasks.task.get', {
     taskId: Number(taskId),
@@ -476,11 +534,6 @@ async function updateTask(taskId, fields) {
   }, { ctx: { step: 'task_update_content', taskId: Number(taskId) } });
 }
 
-/**
- * Обновляет TITLE/DESCRIPTION задачи оплаты под актуальный список файлов.
- * Правило "не дёргать лишний раз": если список файлов в описании совпадает с fileNames —
- * не обновляем описание (а TITLE всё равно обновляем, если отличается).
- */
 async function syncPaymentTaskContent({ taskId, itemId, itemTitle, fileNames, pdfNames, deadline }) {
   const tid = toNum(taskId);
   if (!tid) return { ok: false, action: 'skip_no_taskId' };
@@ -506,16 +559,14 @@ async function syncPaymentTaskContent({ taskId, itemId, itemTitle, fileNames, pd
     changes.title = { from: currentTitle, to: desiredTitle };
   }
 
-  // описание обновляем, если меняется состав PDF (не только количество)
   if (!areSameNameSets(currentFileNames, files)) {
     fields.DESCRIPTION = desiredDescription;
     changes.description = {
-      fromCount: currentPdfNames.length,
-      toCount: desiredPdfCount,
+      fromCount: currentFileNames.length,
+      toCount: desiredFileCount,
     };
   }
 
-  // дедлайн, если передали и он отличается
   if (deadline && String(deadline) !== currentDeadline) {
     fields.DEADLINE = String(deadline);
     changes.deadline = { from: currentDeadline || null, to: String(deadline) };
@@ -548,14 +599,12 @@ async function syncPaidToSuccessByTask({ entityTypeId, taskId }) {
   const itemId = toNum(spa.id);
   const stageId = String(spa.stageId || '');
 
-  // если уже SUCCESS — скипаем
   if (stageId === 'DT1048_14:SUCCESS') {
     return { ok: true, action: 'already_success', itemId, taskId: Number(taskId) };
   }
 
-  // Имена файлов мы тут не знаем — считаем “оплачено”, если ВСЕ пункты чеклиста завершены
   const items = await getChecklist(taskId);
-  const realItems = items.filter(i => String(i.TITLE || '').trim()); // без пустых
+  const realItems = items.filter(i => String(i.TITLE || '').trim());
   if (!realItems.length) return { ok: false, action: 'checklist_empty', itemId, taskId: Number(taskId) };
 
   const allDone = realItems.every(i => String(i.IS_COMPLETE || '').toUpperCase() === 'Y');

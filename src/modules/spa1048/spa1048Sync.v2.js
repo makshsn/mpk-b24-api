@@ -53,15 +53,15 @@ function ufToCamel(uf) {
   if (!/^UF_/i.test(s)) return s;
 
   const lower = s.toLowerCase();
-  const parts = lower.split('_').filter(Boolean); // ['uf','crm','8','176...']
+  const parts = lower.split('_').filter(Boolean);
   if (!parts.length) return '';
 
-  let out = parts[0]; // uf
+  let out = parts[0];
   for (let i = 1; i < parts.length; i++) {
     const p = parts[i];
-    if (i === 1) { out += p.charAt(0).toUpperCase() + p.slice(1); continue; } // crm -> Crm
-    if (/^\d+$/.test(p) && i === 2) { out += p; continue; } // 8
-    out += '_' + p; // остальное
+    if (i === 1) { out += p.charAt(0).toUpperCase() + p.slice(1); continue; }
+    if (/^\d+$/.test(p) && i === 2) { out += p; continue; }
+    out += '_' + p;
   }
   return out;
 }
@@ -71,9 +71,6 @@ function ymdFromDate(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-// ТЗ: если пусто:
-// - если сегодня < 25 -> 25-е текущего месяца
-// - если сегодня >= 25 -> 25-е следующего месяца
 function computeDefaultDeadlineYmd(now = new Date()) {
   const day = now.getDate();
 
@@ -86,7 +83,6 @@ function computeDefaultDeadlineYmd(now = new Date()) {
   return ymdFromDate(d);
 }
 
-// для задачи DEADLINE лучше слать datetime
 function taskDeadlineIso(ymd) {
   if (!ymd) return null;
   const t = String(process.env.SPA1048_TASK_DEADLINE_TIME || 'T18:00:00+03:00').trim();
@@ -116,7 +112,6 @@ async function getTask(taskId, ctxStep) {
   return u?.task || u?.result?.task || u?.result || u;
 }
 
-// Проверяем: taskId существует и задача НЕ выполнена
 async function ensureActiveTaskId(taskId) {
   const tid = Number(taskId) || 0;
   if (!tid) return { activeTaskId: 0, reason: 'no_task_id' };
@@ -125,12 +120,10 @@ async function ensureActiveTaskId(taskId) {
     const t = await getTask(tid, 'task_check_get');
     const status = Number(t?.status || t?.STATUS || 0) || 0;
 
-    // 5 = completed
     if (status === 5) {
       return { activeTaskId: 0, reason: 'task_completed', status };
     }
 
-    // если вдруг API вернул без ID
     const realId = Number(t?.id || t?.ID || 0) || 0;
     if (!realId) {
       return { activeTaskId: 0, reason: 'task_missing_id', status };
@@ -138,7 +131,6 @@ async function ensureActiveTaskId(taskId) {
 
     return { activeTaskId: tid, reason: 'task_active', status };
   } catch (e) {
-    // удалена / не найдена / нет доступа и т.п.
     return { activeTaskId: 0, reason: 'task_get_failed', error: e?.message || String(e) };
   }
 }
@@ -176,9 +168,6 @@ async function autoCloseTaskByChecklist({
   const stageBefore = normalizeStageId(stageId);
   const stageSuccess = 'DT1048_14:SUCCESS';
 
-  // Если элемент уже в финальной стадии "провалено/отмена" —
-  // не выполняем авто-закрытие по чеклисту и не переносим в SUCCESS.
-  // Закрытие задачи в этом сценарии делается отдельным роботом через /b24/task-close.
   const failedStagesEnv = String(
     process.env.SPA1048_STAGE_FAILED || process.env.SPA1048_STAGE_FAIL || ''
   )
@@ -190,7 +179,6 @@ async function autoCloseTaskByChecklist({
     const s = String(sid || '').trim();
     if (!s) return false;
     if (failedStagesEnv.length && failedStagesEnv.includes(s)) return true;
-    // дефолт для SPA1048: DT1048_14:FAIL
     return /(^|:)(FAIL|FAILED|CANCEL|CANCELED|DECLINE|DECLINED|LOSE|LOST)(:|$)/i.test(s);
   };
 
@@ -285,6 +273,13 @@ async function syncSpa1048Item({ itemId, debug = false }) {
 
   const stageId = normalizeStageId(item.stageId || item.STAGE_ID);
 
+  // ✅ ВАЖНО: владелец/ответственный SPA (а не создатель вебхука)
+  const spaAssignedId = Number(item.assignedById || item.ASSIGNED_BY_ID || 0) || 0;
+
+  // fallback на бухгалтера, если assignedById вдруг пустой
+  const accountantId = Number(process.env.SPA1048_ACCOUNTANT_ID || cfg.accountantId || 70);
+  const taskOwnerId = spaAssignedId || accountantId;
+
   // Дедлайн (поле в CRM)
   const deadlineOrig = String(cfg.deadlineField || 'UF_CRM_8_1768219591855');
   const deadlineCamel = ufToCamel(deadlineOrig) || 'ufCrm8_1768219591855';
@@ -310,11 +305,9 @@ async function syncSpa1048Item({ itemId, debug = false }) {
   // taskId из карточки
   const taskId = Number(item.ufCrm8TaskId || item.UF_CRM_8_TASK_ID || item.uf_crm_8_task_id || 0) || 0;
 
-  // ✅ проверяем активность (существует и не выполнена)
   const taskCheck = await ensureActiveTaskId(taskId);
   const activeTaskId = Number(taskCheck.activeTaskId || 0) || 0;
 
-  // --- СИНХРА ДЕДЛАЙНА SPA -> TASK (если активная задача есть) ---
   let taskDeadlineSync = { ok: true, action: 'skipped' };
   if (activeTaskId && deadline) {
     const task = await getTask(activeTaskId, 'task_get_for_deadline_sync');
@@ -332,7 +325,6 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     }
   }
 
-  // файлы (ZIP -> распаковка всех файлов)
   let files = { ok: true, action: 'skipped' };
   if (filesEnabled) {
     try {
@@ -342,9 +334,6 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     }
   }
 
-  // --- СИНХРА КОНТЕНТА ЗАДАЧИ (TITLE/DESCRIPTION) под актуальные файлы ---
-  // Важно: обновляем только когда меняется набор файлов (см. syncPaymentTaskContent),
-  // чтобы не триггерить лишние ONTASKUPDATE.
   let taskContentSync = { ok: true, action: 'skipped', reason: 'no_task' };
   if (activeTaskId && typeof syncPaymentTaskContent === 'function') {
     try {
@@ -361,7 +350,6 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     }
   }
 
-  // чеклист (опционален)
   let checklist = { ok: false, action: 'skipped', reason: 'no_task' };
   let checklistItems = [];
   let checklistSummary = null;
@@ -381,8 +369,6 @@ async function syncSpa1048Item({ itemId, debug = false }) {
     checklist = { ok: false, action: 'skipped', reason: 'module_missing' };
   }
 
-  // --- Создание задачи, если нет активной (в т.ч. удалена/выполнена) ---
-  const accountantId = Number(process.env.SPA1048_ACCOUNTANT_ID || cfg.accountantId || 70);
   let taskCreate = null;
 
   if (!activeTaskId && taskCheck?.reason !== 'task_completed') {
@@ -394,7 +380,8 @@ async function syncSpa1048Item({ itemId, debug = false }) {
       deadline: taskDeadlineIso(deadline),
       taskId,
       fileNames,
-      responsibleId: Number(accountantId),
+      responsibleId: Number(70),
+      createdById: Number(taskOwnerId),
       stageId,
     });
 
@@ -444,8 +431,8 @@ async function syncSpa1048Item({ itemId, debug = false }) {
       entityTypeId,
       deadlineOrig,
       deadlineCamel,
-      checklistSummary,
-      taskAutoClose,
+      spaAssignedId,
+      taskOwnerId,
       stageBefore: stageId,
       stageAfter: taskAutoClose?.stageAfter,
     } : undefined,
