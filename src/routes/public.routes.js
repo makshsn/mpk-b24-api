@@ -6,11 +6,15 @@ const { taskCompletionEvent } = require("../controllers/taskCompletionEvent.cont
 const { taskUpdateWebhook } = require("../controllers/spa1048TaskUpdateWebhook.controller");
 const { taskCloseWebhook } = require("../controllers/taskCloseWebhook.controller");
 
+const b24oauthRoutes = require('./b24oauth.routes');
 const router = express.Router();
 
 // _inspect routes (must be BEFORE debug middleware)
 const inspectRoutes = require('./inspect.routes');
 router.use(inspectRoutes);
+
+// Bitrix OAuth (server-side local app) callbacks & events
+router.use('/oauth', b24oauthRoutes);
 
 // DEBUG middleware: не стопает обработчики
 router.use((req, res, next) => {
