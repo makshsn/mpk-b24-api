@@ -13,28 +13,24 @@ function unwrap(x) {
   return x?.result ?? x;
 }
 
-function ufToCamel(fieldCode) {
-  // UF_CRM_8_1768219591855 -> ufCrm8_1768219591855
-  // UF_CRM_8_TASK_ID      -> ufCrm8TaskId
-  const raw = String(fieldCode || '').trim();
-  if (!raw) return '';
-  const parts = raw.split('_').filter(Boolean);
-  if (parts.length < 3) return raw;
+// UF_CRM_8_176... -> ufCrm8_176...
+function ufToCamel(uf) {
+  const s = String(uf || '').trim();
+  if (!s) return '';
+  if (!/^UF_/i.test(s)) return s;
 
-  const head = (s) => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : '');
+  const lower = s.toLowerCase();
+  const parts = lower.split('_').filter(Boolean); // ['uf','crm','8','176...']
+  if (!parts.length) return '';
 
-  const p0 = parts[0].toLowerCase(); // uf
-  const p1 = head(parts[1]);         // Crm
-  const p2 = parts[2];               // 8
-
-  // Если 4-я часть — числа, то оставляем подчёркивание перед ней (как в реальном ответе crm.item.get/list)
-  if (parts.length === 4 && /^\d+$/.test(parts[3])) {
-    return `${p0}${p1}${p2}_${parts[3]}`;
+  let out = parts[0]; // uf
+  for (let i = 1; i < parts.length; i++) {
+    const p = parts[i];
+    if (i === 1) { out += p.charAt(0).toUpperCase() + p.slice(1); continue; } // crm -> Crm
+    if (/^\d+$/.test(p) && i === 2) { out += p; continue; } // 8
+    out += '_' + p; // остальное
   }
-
-  // Иначе — обычный camelCase по оставшимся частям
-  const tail = parts.slice(3).map(head).join('');
-  return `${p0}${p1}${p2}${tail}`;
+  return out;
 }
 
 function round2(n) {
@@ -154,14 +150,18 @@ async function listSpaItems({ entityTypeId, categoryId, stageIds, select }) {
 }
 
 async function updateRemain(entityTypeId, itemId, remainValue) {
-  // remainValue ДОЛЖЕН соответствовать типу поля (в твоём случае number)
+  const remainCamel = ufToCamel(FIELD_REMAIN) || FIELD_REMAIN;
+
+  // ВАЖНО: как в остальных модулях проекта — ставим useOriginalUfNames и пишем оба ключа
   return await bitrix.call('crm.item.update', {
     entityTypeId: Number(entityTypeId),
     id: Number(itemId),
+    useOriginalUfNames: 'Y',
     fields: {
       [FIELD_REMAIN]: remainValue,
+      [remainCamel]: remainValue,
     },
-  });
+  }, { ctx: { step: 'spa1048_remaining_update', itemId, remainValue } });
 }
 
 /**
@@ -175,10 +175,8 @@ async function runRemainingToPayOnce(options = {}) {
   const updateLimit = Math.max(1, Math.min(500, Number(options.limit || process.env.SPA1048_REMAINING_UPDATE_LIMIT || 50)));
   const dryRun = String(options.dryRun || process.env.SPA1048_REMAINING_DRY_RUN || 'N').toUpperCase() === 'Y';
 
-  // Опционально ограничиваемся стадиями "в работе" (если заданы в cfg)
   const stageIds = Array.isArray(cfg.stageActive) && cfg.stageActive.length ? cfg.stageActive : null;
 
-  // Финальные стадии — пропускаем (если заданы)
   const finalStageIds = new Set(
     [
       ...(Array.isArray(cfg.stageFinal) ? cfg.stageFinal : []),
@@ -210,10 +208,9 @@ async function runRemainingToPayOnce(options = {}) {
   const paidType = pickFieldType(fieldsMap, FIELD_PAID);     // ожидаем double/int/string
   const remainType = pickFieldType(fieldsMap, FIELD_REMAIN); // ожидаем double/int
 
-  // Важно для диагностики
+  // Это уйдёт в spa1048.log
   logger.info({ entityTypeId, totalType, paidType, remainType }, '[spa1048][remain] field types');
 
-  // Категории: либо одна из opts/env, либо все
   const categoryIds = [];
   if (options.categoryId != null) {
     categoryIds.push(Number(options.categoryId));
@@ -222,7 +219,7 @@ async function runRemainingToPayOnce(options = {}) {
   } else {
     const cats = await listCategories(entityTypeId);
     for (const c of cats) categoryIds.push(Number(c.id ?? c.ID));
-    if (!categoryIds.length) categoryIds.push(null); // на всякий случай
+    if (!categoryIds.length) categoryIds.push(null);
   }
 
   const summary = {
@@ -235,6 +232,7 @@ async function runRemainingToPayOnce(options = {}) {
     updatedTotal: 0,
     skippedTotalNotSet: 0,
     skippedFinalStage: 0,
+    updatedItems: [], // <= 10 шт, чтобы в jobs.log было видно какой элемент реально обновили
     categories: {},
   };
 
@@ -267,9 +265,8 @@ async function runRemainingToPayOnce(options = {}) {
         continue;
       }
 
-      // total: money (берём из camel либо из UF_*)
       const totalRaw = it?.[totalCamel] ?? it?.[FIELD_TOTAL];
-      const totalMoney = (totalType === 'money') ? parseMoney(totalRaw) : null;
+      const totalMoney = (totalType === 'money') ? parseMoney(totalRaw) : parseMoney(totalRaw); // money у тебя точно, но оставим универсально
       const totalAmount = totalMoney?.amount;
 
       if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
@@ -278,13 +275,11 @@ async function runRemainingToPayOnce(options = {}) {
         continue;
       }
 
-      // paid: number (берём из camel либо из UF_*)
       const paidRaw = it?.[paidCamel] ?? it?.[FIELD_PAID];
       const paidAmount = parseNumber(paidRaw) ?? 0;
 
       const desiredRemain = round2(Math.max(0, Number(totalAmount) - Number(paidAmount)));
 
-      // текущий remain: number
       const currRemainRaw = it?.[remainCamel] ?? it?.[FIELD_REMAIN];
       const currRemain = parseNumber(currRemainRaw);
       const currRemainR = currRemain == null ? null : round2(currRemain);
@@ -307,13 +302,22 @@ async function runRemainingToPayOnce(options = {}) {
         continue;
       }
 
-      // remainType должен быть числовой; если вдруг окажется money — можно будет расширить,
-      // но по твоим словам поле "остаток" = число => пишем число.
       await updateRemain(entityTypeId, it.id, desiredRemain);
 
       catUpdated++;
       updated++;
       summary.updatedTotal++;
+
+      if (summary.updatedItems.length < 10) {
+        summary.updatedItems.push({
+          id: Number(it.id),
+          title: String(it.title || ''),
+          totalRaw,
+          paidRaw,
+          remainBefore: currRemainRaw ?? null,
+          remainAfter: desiredRemain,
+        });
+      }
 
       if (updated >= updateLimit) {
         summary.categories[catKey] = {

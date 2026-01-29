@@ -1,5 +1,5 @@
-[dotenv@17.2.3] injecting env (60) from .env -- tip: ⚙️  write to custom object with { processEnv: myObject }
-PAUSE=UC_79QMBF count=78
+[dotenv@17.2.3] injecting env (63) from .env -- tip: 🔐 prevent building .env in docker: https://dotenvx.com/prebuild
+PAUSE=UC_79QMBF count=70
 206
 214
 222
@@ -37,21 +37,14 @@ PAUSE=UC_79QMBF count=78
 874
 880
 1052
-1118
 1140
-1168
 1194
-1198
 1270
-1288
 1300
-1310
 1312
-1334
 1340
 1354
 1390
-1422
 1430
 1470
 1488
@@ -63,8 +56,6 @@ PAUSE=UC_79QMBF count=78
 1586
 1604
 1644
-1684
-1698
 1726
 1730
 1750
@@ -77,4 +68,5 @@ PAUSE=UC_79QMBF count=78
 1938
 1940
 1946
+1964
 1994
