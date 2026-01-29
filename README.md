@@ -20,7 +20,9 @@
 - `src/routes/*` — маршруты `/b24/*` и `/api/v1/bitrix/*`.
 - `src/controllers/*` — тонкий слой HTTP-контроллеров.
 - `src/services/bitrix/*` — вызовы Bitrix API и бизнес‑операции по лидам/контактам.
+- `src/services/b24oauth/*` — OAuth‑установка приложения, REST‑клиент, bind/unbind событий.
 - `src/modules/spa1048/*` — логика смарт‑процесса SPA‑1048.
+- `src/modules/dynamicItems/*` — универсальный процессор событий SPA (diff/snapshots/registry).
 - `src/jobs/*` — периодические джобы (отдельные процессы под PM2/cron).
 - `src/workers/*` — воркеры, которые постоянно крутятся в фоне.
 - `.inspect/` — хранилище входящих запросов для отладки (см. раздел 6).
@@ -204,6 +206,94 @@ curl -s http://127.0.0.1:3000/health
 
 Важно: этот эндпоинт относится к задачам лидов ("Связаться с клиентом...") и не является основным для SPA‑1048.
 Для SPA‑1048 используйте `/b24/task-event` (см. раздел 3.1.2) и не дублируйте `ONTASKUPDATE` на несколько URL.
+
+---
+
+### 3.3. Приложение Bitrix24 (OAuth) для отслеживания обновлений SPA: `/b24/oauth/*`
+
+Это **локальное приложение Bitrix24** (только для портала `b24-mg3u3i.bitrix24.ru`), которое подписывается на события смарт‑процессов (Dynamic Items) через `event.bind` и принимает события на публичный HTTPS‑endpoint сервиса.
+
+Зачем нужно (в дополнение к обычным исходящим вебхукам/роботам/БП):
+- получать **официальные события CRM Dynamic Items** (ADD/UPDATE/DELETE) без “костылей” в БП;
+- унифицировать обработку: *событие → догрузить item → diff → бизнес‑обработчик → снапшот*;
+- точечно запускать логику по изменению конкретных полей (например, “оплачено” → пересчёт остатка).
+
+#### Входные точки (HTTP)
+
+Файл маршрутов: `src/routes/b24oauth.routes.js`
+
+- `POST|GET /b24/oauth/install` — callback установки приложения (Bitrix24 присылает токены/контекст установки).
+- `GET|POST /b24/oauth/install-page` — страница завершения установки (**обязательно** вызывает `BX24.installFinish()` внутри iframe Bitrix24).
+- `POST|GET /b24/oauth/event` — приёмник событий (handler), на который подписываемся через `event.bind`.
+- `GET /b24/oauth/status` — состояние сохранённой установки (для отладки).
+- `GET /b24/oauth/events` — список подписок в портале (вызов `event.get`) + фильтр по нашим событиям/handler URL (для отладки).
+- `POST|GET /b24/oauth/event-test` — ручной smoke‑тест (`event.test`) (для отладки).
+
+#### Какие события подписываем
+
+Подписка выполняется при установке приложения:
+- `ONCRMDYNAMICITEMADD`
+- `ONCRMDYNAMICITEMUPDATE`
+- `ONCRMDYNAMICITEMDELETE`
+
+Handler: `https://mpk-b24-webhooks.online/b24/oauth/event`
+
+#### Архитектура обработки событий (внутри сервиса)
+
+**Поток данных**
+1) Bitrix24 → `POST /b24/oauth/event`  
+2) `b24oauth.controller` нормализует payload, проверяет `portal` и `application_token`, отвечает **200 OK** и ставит обработку “в очередь” внутри процесса.
+3) `src/modules/dynamicItems/dynamicItemEventProcessor.v1.js`:
+   - делает `crm.item.get` (берёт актуальные поля/стадию/связи);
+   - нормализует item в плоский snapshot;
+   - сравнивает с предыдущим snapshot → `diff.changedKeys`, `diff.stageChanged`;
+   - сохраняет snapshot в `var/dynamic_item_snapshots/<entityTypeId>/<itemId>.json`;
+   - вызывает handler по `entityTypeId` из реестра.
+4) `src/modules/dynamicItems/dynamicItemRegistry.v1.js` — реестр обработчиков по `entityTypeId` (модульная архитектура, без монолита).
+
+**Где хранится “прошлое состояние”**
+- Снапшоты: `var/dynamic_item_snapshots/<entityTypeId>/<itemId>.json`  
+  Это даёт стабильный diff между событиями, даже если Bitrix24 не передаёт diff напрямую.
+
+**Логи**
+- Канал `b24oauth` → `logs/b24oauth.log`
+- Канал `dynamic-items` → `logs/dynamic-items.log`
+
+#### Конфигурация (.env)
+
+Минимум для работы приложения:
+- `B24_OAUTH_PORTAL=b24-mg3u3i.bitrix24.ru` — защита от “чужих” порталов.
+- `B24_OAUTH_PUBLIC_BASE_URL=https://mpk-b24-webhooks.online` — публичная база, чтобы формировать handler URL.
+
+Опционально:
+- `SPA1048_ENTITY_TYPE_ID=1048` — какой `entityTypeId` считать “счетами” (по умолчанию 1048).
+- `DYNAMIC_ITEM_PROCESSOR_ENABLED=1` — включить/выключить обработчик событий (0/1).
+- `DYNAMIC_ITEM_WATCH_ENTITY_TYPE_IDS=1048,1234,...` — allow‑list по `entityTypeId` (если нужно ограничить).
+
+#### Возможности для SPA‑1048, включённые через приложение
+
+1) **Событийная синхронизация SPA‑1048 ↔ задача**  
+   На `ONCRMDYNAMICITEMUPDATE` для `entityTypeId=1048` вызывается `syncSpa1048Item(...)`.
+
+2) **Точечный пересчёт “остатка к оплате” при изменении поля “оплачено”**  
+   Поле оплаты: `UF_CRM_8_1769511446943` (`ufCrm8_1769511446943`).  
+   При его изменении вызывается пересчёт и обновляется поле остатка: `UF_CRM_8_1769511472212`.
+
+3) **Снятие зависимости от периодического watcher’а**  
+   Автопрогон “раз в N времени” для пересчёта остатка убран: логика запускается **по событию изменения поля**.
+
+#### Как быстро проверить работоспособность
+
+1) Убедиться, что подписки есть:
+```bash
+curl -s https://mpk-b24-webhooks.online/b24/oauth/events | head -c 2000
+```
+
+2) Изменить стадию/поле в элементе SPA‑1048 → проверить доставку:
+- nginx: `POST /b24/oauth/event` от `Bitrix24 Webhook Engine`
+- `logs/b24oauth.log`: `event=ONCRMDYNAMICITEMUPDATE`, `entityTypeId`, `itemId`
+- `logs/dynamic-items.log`: `event processed`, `handled`
+- снапшот: `var/dynamic_item_snapshots/1048/<itemId>.json`
 
 ---
 

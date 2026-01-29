@@ -4,7 +4,7 @@ const { getLogger } = require('../../services/logging');
 
 const logger = getLogger('spa1048');
 
-// Поля (из твоего сообщения)
+// Поля
 const FIELD_TOTAL = 'UF_CRM_8_1769511406016';   // общая сумма счёта (money)
 const FIELD_PAID = 'UF_CRM_8_1769511446943';    // общая сумма выплат (number)
 const FIELD_REMAIN = 'UF_CRM_8_1769511472212';  // остаток к оплате (number)
@@ -164,8 +164,79 @@ async function updateRemain(entityTypeId, itemId, remainValue) {
   }, { ctx: { step: 'spa1048_remaining_update', itemId, remainValue } });
 }
 
+async function getItem(entityTypeId, itemId) {
+  const r = await bitrix.call('crm.item.get', {
+    entityTypeId: Number(entityTypeId),
+    id: Number(itemId),
+    select: ['*'],
+  }, { ctx: { step: 'spa1048_remaining_get_item', itemId } });
+
+  const u = unwrap(r);
+  return u?.item || u;
+}
+
 /**
- * Пересчитывает остаток к оплате: total(money) - paid(number) = remain(number)
+ * Пересчитать остаток к оплате для конкретного item:
+ * total(money) - paid(number) = remain(number)
+ */
+async function recalcRemainingForItem(options = {}) {
+  const entityTypeId = Number(options.entityTypeId || cfg.entityTypeId || 1048);
+  const itemId = Number(options.itemId || 0);
+  if (!itemId) return { ok: false, error: 'missing_itemId' };
+
+  const dryRun = String(options.dryRun || process.env.SPA1048_REMAINING_DRY_RUN || 'N').toUpperCase() === 'Y';
+
+  const totalCamel = ufToCamel(FIELD_TOTAL);
+  const paidCamel = ufToCamel(FIELD_PAID);
+  const remainCamel = ufToCamel(FIELD_REMAIN);
+
+  const it = await getItem(entityTypeId, itemId);
+
+  const totalRaw = it?.[totalCamel] ?? it?.[FIELD_TOTAL];
+  const paidRaw = it?.[paidCamel] ?? it?.[FIELD_PAID];
+  const remainRaw = it?.[remainCamel] ?? it?.[FIELD_REMAIN];
+
+  const totalMoney = parseMoney(totalRaw);
+  const totalAmount = totalMoney?.amount;
+
+  if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+    return { ok: true, action: 'skip_total_not_set', itemId, totalRaw };
+  }
+
+  const paidAmount = parseNumber(paidRaw) ?? 0;
+  const desiredRemain = round2(Math.max(0, Number(totalAmount) - Number(paidAmount)));
+
+  const currRemain = parseNumber(remainRaw);
+  const currRemainR = currRemain == null ? null : round2(currRemain);
+
+  const same = (currRemainR != null) && (desiredRemain != null) && Math.abs(currRemainR - desiredRemain) < 0.009;
+  if (same) {
+    return { ok: true, action: 'no_change', itemId, remain: currRemainR };
+  }
+
+  if (dryRun) {
+    logger.info(
+      { itemId, totalRaw, paidRaw, remainBefore: remainRaw, remainAfter: desiredRemain },
+      '[spa1048][remain] dry-run: would update item remain'
+    );
+    return { ok: true, action: 'dry_run', itemId, remainAfter: desiredRemain };
+  }
+
+  await updateRemain(entityTypeId, itemId, desiredRemain);
+
+  return {
+    ok: true,
+    action: 'updated',
+    itemId,
+    totalRaw,
+    paidRaw,
+    remainBefore: remainRaw ?? null,
+    remainAfter: desiredRemain,
+  };
+}
+
+/**
+ * Пакетный пересчёт по списку (как было)
  */
 async function runRemainingToPayOnce(options = {}) {
   const entityTypeId = Number(options.entityTypeId || cfg.entityTypeId || 1048);
@@ -208,7 +279,6 @@ async function runRemainingToPayOnce(options = {}) {
   const paidType = pickFieldType(fieldsMap, FIELD_PAID);     // ожидаем double/int/string
   const remainType = pickFieldType(fieldsMap, FIELD_REMAIN); // ожидаем double/int
 
-  // Это уйдёт в spa1048.log
   logger.info({ entityTypeId, totalType, paidType, remainType }, '[spa1048][remain] field types');
 
   const categoryIds = [];
@@ -232,7 +302,7 @@ async function runRemainingToPayOnce(options = {}) {
     updatedTotal: 0,
     skippedTotalNotSet: 0,
     skippedFinalStage: 0,
-    updatedItems: [], // <= 10 шт, чтобы в jobs.log было видно какой элемент реально обновили
+    updatedItems: [],
     categories: {},
   };
 
@@ -266,7 +336,7 @@ async function runRemainingToPayOnce(options = {}) {
       }
 
       const totalRaw = it?.[totalCamel] ?? it?.[FIELD_TOTAL];
-      const totalMoney = (totalType === 'money') ? parseMoney(totalRaw) : parseMoney(totalRaw); // money у тебя точно, но оставим универсально
+      const totalMoney = parseMoney(totalRaw);
       const totalAmount = totalMoney?.amount;
 
       if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
@@ -346,6 +416,7 @@ async function runRemainingToPayOnce(options = {}) {
 
 module.exports = {
   runRemainingToPayOnce,
+  recalcRemainingForItem,
   FIELDS: {
     FIELD_TOTAL,
     FIELD_PAID,

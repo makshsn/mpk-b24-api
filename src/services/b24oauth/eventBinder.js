@@ -19,21 +19,74 @@ function buildHandlerUrl() {
   return `${base}/b24/oauth/event`;
 }
 
+// Универсальные события по Смарт-процессам (SPA / dynamic items)
+// Документация: Events of Custom CRM Types (ONCRMDYNAMICITEMADD/UPDATE/DELETE)
+// https://apidocs.bitrix24.com/api-reference/crm/universal/events/index.html
+const DYNAMIC_ITEM_EVENTS = [
+  'ONCRMDYNAMICITEMADD',
+  'ONCRMDYNAMICITEMUPDATE',
+  'ONCRMDYNAMICITEMDELETE',
+];
+
+async function bindEvent(event, handler, event_type = 'online') {
+  return await call(
+    'event.bind',
+    { event, handler, event_type },
+    { ctx: { step: 'event.bind', event } }
+  );
+}
+
+async function unbindEvent(event, handler) {
+  return await call(
+    'event.unbind',
+    { event, handler },
+    { ctx: { step: 'event.unbind', event } }
+  );
+}
+
+async function bindDynamicItemEvents(handlerUrl = null) {
+  const handler = handlerUrl || buildHandlerUrl();
+
+  const results = [];
+  for (const ev of DYNAMIC_ITEM_EVENTS) {
+    const r = await bindEvent(ev, handler, 'online');
+    results.push({ event: ev, result: r });
+  }
+
+  return { ok: true, handler, bound: results };
+}
+
+async function unbindDynamicItemEvents(handlerUrl = null) {
+  const handler = handlerUrl || buildHandlerUrl();
+
+  const results = [];
+  for (const ev of DYNAMIC_ITEM_EVENTS) {
+    try {
+      const r = await unbindEvent(ev, handler);
+      results.push({ event: ev, result: r, ok: true });
+    } catch (e) {
+      // event.unbind может кидать ошибку, если привязки нет — это не фатально
+      results.push({
+        event: ev,
+        ok: false,
+        error: e?.message || String(e),
+        data: e?.data,
+      });
+    }
+  }
+
+  return { ok: true, handler, unbound: results };
+}
+
+// Backward compatibility (старые имена)
 async function bindDynamicItemUpdate(handlerUrl = null) {
   const handler = handlerUrl || buildHandlerUrl();
-  return await call('event.bind', {
-    event: 'ONCRMDYNAMICITEMUPDATE',
-    handler,
-    event_type: 'online',
-  }, { ctx: { step: 'event.bind', event: 'ONCRMDYNAMICITEMUPDATE' } });
+  return await bindEvent('ONCRMDYNAMICITEMUPDATE', handler, 'online');
 }
 
 async function unbindDynamicItemUpdate(handlerUrl = null) {
   const handler = handlerUrl || buildHandlerUrl();
-  return await call('event.unbind', {
-    event: 'ONCRMDYNAMICITEMUPDATE',
-    handler,
-  }, { ctx: { step: 'event.unbind', event: 'ONCRMDYNAMICITEMUPDATE' } });
+  return await unbindEvent('ONCRMDYNAMICITEMUPDATE', handler);
 }
 
 async function appInfo() {
@@ -41,6 +94,9 @@ async function appInfo() {
 }
 
 module.exports = {
+  DYNAMIC_ITEM_EVENTS,
+  bindDynamicItemEvents,
+  unbindDynamicItemEvents,
   bindDynamicItemUpdate,
   unbindDynamicItemUpdate,
   appInfo,

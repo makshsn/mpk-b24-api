@@ -16,33 +16,71 @@ function envBool(name, def = false) {
   return def;
 }
 
-function parseAllowlist() {
+/**
+ * allowlist поддерживает:
+ * - точный email:   "a@b.com"
+ * - домен:          "@b.com"   (любой user@b.com)
+ * - wildcard:       "*@b.com", "user+*@b.com", "*billing*"
+ */
+function parseAllowRules() {
   const raw = String(process.env.MAIL_ALLOWED_FROM || '').trim();
-  if (!raw) return new Set();
-  return new Set(
-    raw
-      .split(',')
-      .map((s) => String(s || '').trim().toLowerCase())
-      .filter(Boolean)
-  );
+  if (!raw) return [];
+
+  return raw
+    .split(',')
+    .map((s) => String(s || '').trim().toLowerCase())
+    .filter(Boolean)
+    .map((rule) => {
+      // domain rule
+      if (rule.startsWith('@') && rule.length > 1) {
+        return { type: 'domain', value: rule.slice(1) };
+      }
+
+      // wildcard -> regex
+      if (rule.includes('*')) {
+        const escaped = rule.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+        return { type: 'regex', value: new RegExp(`^${escaped}$`, 'i'), raw: rule };
+      }
+
+      // exact
+      return { type: 'exact', value: rule };
+    });
+}
+
+function isAllowedSender(senderEmail, rules) {
+  const s = String(senderEmail || '').trim().toLowerCase();
+  if (!s) return false;
+
+  for (const r of rules) {
+    if (r.type === 'exact' && s === r.value) return true;
+    if (r.type === 'domain' && s.endsWith(`@${r.value}`)) return true;
+    if (r.type === 'regex' && r.value.test(s)) return true;
+  }
+  return false;
 }
 
 async function runOnce({ limit = 10 } = {}) {
-  // Глобальный lock: защищает от параллельных запусков (pm2 cluster, job+ручной запуск и т.п.)
+  // Глобальный lock: защищает от параллельных запусков
   const globalLock = acquireLock('mail:spa1048:auto:runOnce', Number(process.env.MAIL_AUTO_LOCK_TTL_MS || 5 * 60 * 1000));
   if (!globalLock.ok) return { ok: false, error: globalLock.error || 'auto_lock_failed' };
   if (!globalLock.acquired) {
     return { ok: true, skipped: 'already_running', reason: globalLock.reason || 'locked' };
   }
 
-  const allow = parseAllowlist();
-  if (!allow.size) {
+  const allowRequired = envBool('MAIL_ALLOWLIST_REQUIRED', true);
+  const allowRules = parseAllowRules();
+
+  if (allowRequired && !allowRules.length) {
     releaseLock(globalLock);
     return { ok: false, error: 'MAIL_ALLOWED_FROM is empty (allowlist required)' };
   }
 
-  const skipMarkSeen = envBool('MAIL_SKIP_MARK_SEEN', true);
-  const skipLabel = String(process.env.MAIL_SKIP_LABEL || '').trim();
+  // Поведение для skipped
+  const markSkippedSeen = envBool('MAIL_MARK_SKIPPED_SEEN', false);
+  const skippedLabel = String(process.env.MAIL_SKIP_LABEL || '').trim();
+
+  // Поведение для processed
+  const markAllowedSeen = envBool('MAIL_MARK_ALLOWED_SEEN', true);
   const processedLabel = String(process.env.MAIL_PROCESSED_LABEL || '').trim();
 
   const listed = await listUnreadEmails({ limit });
@@ -52,14 +90,24 @@ async function runOnce({ limit = 10 } = {}) {
 
   for (const m of listed.items || []) {
     const addr = String(m.fromAddr || '').toLowerCase();
-    if (addr && allow.has(addr)) allowed.push(m);
+    const ok = allowRules.length ? isAllowedSender(addr, allowRules) : true; // если allowlist не обязателен и пуст — пропускаем всех
+    if (ok) allowed.push(m);
     else skipped.push(m);
   }
 
   if (skipped.length) {
+    // ВАЖНО: по дефолту НЕ помечаем прочитанным, чтобы не “съедать” письма
     const uids = skipped.map((x) => x.uid);
-    if (skipMarkSeen) await markSeenByUids(uids);
-    if (skipLabel) await addLabelByUids(uids, skipLabel);
+    if (markSkippedSeen) await markSeenByUids(uids);
+    if (skippedLabel) await addLabelByUids(uids, skippedLabel);
+
+    logger.warn(
+      {
+        skipped: skipped.length,
+        examples: skipped.slice(-5).map((x) => ({ uid: x.uid, fromAddr: x.fromAddr, subject: x.subject })),
+      },
+      '[mail][auto] skipped by allowlist'
+    );
   }
 
   if (!allowed.length) {
@@ -82,7 +130,6 @@ async function runOnce({ limit = 10 } = {}) {
     const uid = msg.uid;
     const senderEmail = String(msg?.normalized?.fromAddr || '').toLowerCase();
 
-    // Lock на конкретное письмо (mailbox+uid) — защита от гонок при параллельном runOnce.
     const mailKey = `mail:${rawBatch.mailbox || 'INBOX'}:uid:${uid}`;
     const mailLock = acquireLock(mailKey, Number(process.env.MAIL_UID_LOCK_TTL_MS || 10 * 60 * 1000));
     if (!mailLock.ok) {
@@ -111,7 +158,7 @@ async function runOnce({ limit = 10 } = {}) {
         senderEmail,
       });
 
-      await markSeenByUids([uid]);
+      if (markAllowedSeen) await markSeenByUids([uid]);
       if (processedLabel) await addLabelByUids([uid], processedLabel);
 
       results.push({ ok: true, uid, senderEmail, emailId: rec.id, itemId: created.itemId, mappedUserId: created.mappedUserId });
@@ -119,6 +166,7 @@ async function runOnce({ limit = 10 } = {}) {
       const err = e?.message || String(e);
       logger.error({ uid, senderEmail, err }, '[mail][auto] failed to create spa from email');
       results.push({ ok: false, uid, senderEmail, error: err });
+      // важно: при ошибке НЕ помечаем прочитанным
     } finally {
       releaseLock(mailLock);
     }

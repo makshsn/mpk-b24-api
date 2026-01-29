@@ -11,26 +11,35 @@ const logger = getLogger('jobs');
 
 const { runRemainingToPayOnce } = require('../modules/spa1048/spa1048RemainingToPay');
 
-const enabled = String(process.env.SPA1048_REMAINING_ENABLED || 'Y').toUpperCase() !== 'N';
-const intervalSec = Math.max(10, Number(process.env.SPA1048_REMAINING_INTERVAL_SEC || 60));
+/**
+ * Раньше это был watcher с setInterval().
+ * Теперь — one-shot: один прогон и выход.
+ *
+ * По умолчанию выключено (чтобы случайно не запускать по расписанию).
+ * Включить вручную можно env-переменной:
+ *   SPA1048_REMAINING_ENABLED=Y
+ */
+const enabled = String(process.env.SPA1048_REMAINING_ENABLED || 'N').toUpperCase() === 'Y';
 const updateLimit = Math.max(1, Math.min(500, Number(process.env.SPA1048_REMAINING_UPDATE_LIMIT || 50)));
-
-async function tick() {
-  if (!enabled) return;
-
-  try {
-    const res = await runRemainingToPayOnce({ limit: updateLimit });
-    logger.info({ res }, '[spa1048][remaining] tick ok');
-  } catch (e) {
-    logger.error({ err: e?.message, data: e?.data }, '[spa1048][remaining] tick failed');
-  }
-}
 
 process.on('unhandledRejection', (e) => logger.error({ err: String(e) }, 'unhandledRejection'));
 process.on('uncaughtException', (e) => logger.error({ err: String(e) }, 'uncaughtException'));
 
 (async () => {
-  logger.info({ enabled, intervalSec, updateLimit }, '[spa1048][remaining] watcher started');
-  await tick();
-  setInterval(tick, intervalSec * 1000);
+  logger.info({ enabled, updateLimit }, '[spa1048][remaining] one-shot started');
+
+  if (!enabled) {
+    logger.info({ enabled }, '[spa1048][remaining] disabled -> exit');
+    process.exit(0);
+    return;
+  }
+
+  try {
+    const res = await runRemainingToPayOnce({ limit: updateLimit });
+    logger.info({ res }, '[spa1048][remaining] one-shot ok');
+    process.exit(0);
+  } catch (e) {
+    logger.error({ err: e?.message, data: e?.data }, '[spa1048][remaining] one-shot failed');
+    process.exit(1);
+  }
 })();

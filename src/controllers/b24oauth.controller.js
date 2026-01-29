@@ -5,9 +5,16 @@ const log = getLogger('b24oauth');
 
 const { getInstall, setInstall, publicStatus } = require('../services/b24oauth/tokenStore');
 const { exchangeCode } = require('../services/b24oauth/oauthApi');
-const { bindDynamicItemUpdate, unbindDynamicItemUpdate, appInfo, buildHandlerUrl } = require('../services/b24oauth/eventBinder');
+const {
+  DYNAMIC_ITEM_EVENTS,
+  bindDynamicItemEvents,
+  unbindDynamicItemEvents,
+  appInfo,
+  buildHandlerUrl,
+} = require('../services/b24oauth/eventBinder');
 const { normalizeEventPayload } = require('../services/b24oauth/eventPayload');
 const { call } = require('../services/b24oauth/restClient');
+const { enqueueDynamicItemEvent } = require('../modules/dynamicItems/dynamicItemEventProcessor.v1');
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -222,15 +229,15 @@ async function install(req, res, next) {
       updatedAt: new Date().toISOString(),
     });
 
-    // Bind event
+    // Bind events (SPA / dynamic items)
     let unbindRes = null;
     let bindRes = null;
     const handlerUrl = buildHandlerUrl();
 
-    try { unbindRes = await unbindDynamicItemUpdate(handlerUrl); }
+    try { unbindRes = await unbindDynamicItemEvents(handlerUrl); }
     catch (e) { unbindRes = { ok: false, error: e.message, data: e.data }; }
 
-    try { bindRes = await bindDynamicItemUpdate(handlerUrl); }
+    try { bindRes = await bindDynamicItemEvents(handlerUrl); }
     catch (e) { bindRes = { ok: false, error: e.message, data: e.data }; }
 
     log.info(
@@ -276,7 +283,8 @@ async function event(req, res, next) {
       rawKeys: Object.keys(req.body || {}),
     }, '[b24oauth] event received');
 
-    return res.json({ ok: true });
+    const queued = enqueueDynamicItemEvent(payload);
+    return res.json({ ok: true, queued });
   } catch (e) {
     return next(e);
   }
@@ -302,14 +310,14 @@ async function eventsList(_req, res, next) {
     const filtered = list.filter((x) => {
       const ev = String(x?.event || x?.EVENT || '').toUpperCase();
       const h = String(x?.handler || x?.HANDLER || '');
-      return ev === 'ONCRMDYNAMICITEMUPDATE' && h === handlerUrl;
+      return DYNAMIC_ITEM_EVENTS.includes(ev) && h === handlerUrl;
     });
 
     return res.json({
       ok: true,
       total: list.length,
       handlerUrl,
-      matchOnCrmDynamicItemUpdate: filtered,
+      matchDynamicItemEvents: filtered,
       events: list,
     });
   } catch (e) {
