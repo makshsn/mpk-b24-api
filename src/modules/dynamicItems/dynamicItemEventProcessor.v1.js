@@ -9,19 +9,26 @@ const { normalizeItemForSnapshot, buildDiff } = require('./diff.v1');
 const { readSnapshot, writeSnapshot } = require('./snapshotStore.v1');
 const { buildRegistry } = require('./dynamicItemRegistry.v1');
 
-// ---- in-process locks: защита от бурстов событий по одному и тому же item ----
-const locks = new Map();
-async function withLock(key, fn) {
+// ---- in-process per-item queue: гарантия, что события НЕ теряются ----
+// Старый "lock" склеивал события (второе событие возвращало тот же promise и не выполнялось).
+// Здесь — настоящая очередь (promise chain) по ключу entityTypeId:itemId.
+const queues = new Map();
+async function withItemQueue(key, fn) {
   const k = String(key);
-  if (locks.has(k)) return await locks.get(k);
 
-  const p = (async () => {
-    try { return await fn(); }
-    finally { locks.delete(k); }
-  })();
+  const prev = queues.get(k) || Promise.resolve();
 
-  locks.set(k, p);
-  return await p;
+  // Важно: даже если prev упал — следующий fn всё равно должен выполниться.
+  const next = prev
+    .catch(() => null)
+    .then(() => fn())
+    .finally(() => {
+      // чистим только если мы всё ещё последний хвост очереди
+      if (queues.get(k) === next) queues.delete(k);
+    });
+
+  queues.set(k, next);
+  return await next;
 }
 
 function toNum(v) {
@@ -84,15 +91,25 @@ async function processOne(payload) {
     return { ok: true, action: 'skip_no_handler', entityTypeId, itemId, event };
   }
 
-  // Гарантируем последовательность по item
+  // Гарантируем последовательность по item И НЕ теряем события
   const lockKey = `${entityTypeId}:${itemId}`;
-  return await withLock(lockKey, async () => {
+  return await withItemQueue(lockKey, async () => {
     let item = null;
     try {
       item = await fetchItem(entityTypeId, itemId);
     } catch (e) {
-      logger.error({ entityTypeId, itemId, event, err: e?.message || String(e), data: e?.data }, '[dynamic-items] crm.item.get failed');
-      return { ok: false, action: 'crm_item_get_failed', entityTypeId, itemId, event, error: e?.message || String(e) };
+      logger.error(
+        { entityTypeId, itemId, event, err: e?.message || String(e), data: e?.data },
+        '[dynamic-items] crm.item.get failed'
+      );
+      return {
+        ok: false,
+        action: 'crm_item_get_failed',
+        entityTypeId,
+        itemId,
+        event,
+        error: e?.message || String(e),
+      };
     }
 
     const nextSnap = {
@@ -111,7 +128,10 @@ async function processOne(payload) {
     try {
       writeSnapshot(entityTypeId, itemId, nextSnap);
     } catch (e) {
-      logger.warn({ entityTypeId, itemId, event, err: e?.message || String(e) }, '[dynamic-items] snapshot write failed');
+      logger.warn(
+        { entityTypeId, itemId, event, err: e?.message || String(e) },
+        '[dynamic-items] snapshot write failed'
+      );
     }
 
     // Отдаём handler полный контекст
@@ -126,14 +146,28 @@ async function processOne(payload) {
       rawPayload: payload,
     };
 
-    logger.info({ entityTypeId, itemId, event, stageChanged: diff.stageChanged, changedKeys: diff.changedKeys }, '[dynamic-items] event processed');
+    logger.info(
+      { entityTypeId, itemId, event, stageChanged: diff.stageChanged, changedKeys: diff.changedKeys },
+      '[dynamic-items] event processed'
+    );
 
     try {
       const r = await handler(ctx);
       return { ok: true, action: 'handled', entityTypeId, itemId, event, handlerResult: r, diff };
     } catch (e) {
-      logger.error({ entityTypeId, itemId, event, err: e?.message || String(e) }, '[dynamic-items] handler failed');
-      return { ok: false, action: 'handler_failed', entityTypeId, itemId, event, error: e?.message || String(e), diff };
+      logger.error(
+        { entityTypeId, itemId, event, err: e?.message || String(e) },
+        '[dynamic-items] handler failed'
+      );
+      return {
+        ok: false,
+        action: 'handler_failed',
+        entityTypeId,
+        itemId,
+        event,
+        error: e?.message || String(e),
+        diff,
+      };
     }
   });
 }

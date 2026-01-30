@@ -23,6 +23,7 @@ const FILES = {
   app: 'app.log',          // HTTP/access + общий апп-лог
   bitrix: 'bitrix.log',    // REST Bitrix
   spa1048: 'spa1048.log',  // бизнес-логика SPA1048
+  'dynamic-items': 'dynamic-items.log', // OAuth dynamic item events processor
   jobs: 'jobs.log',        // джобы/воркеры
   mail: 'mail.log',        // интеграция почты
   errors: 'errors.log',    // unhandled/errors middleware
