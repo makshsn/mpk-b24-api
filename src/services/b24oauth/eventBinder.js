@@ -28,6 +28,13 @@ const DYNAMIC_ITEM_EVENTS = [
   'ONCRMDYNAMICITEMDELETE',
 ];
 
+// События по сделкам
+// Документация: Events When Working with Deals
+// https://apidocs.bitrix24.com/api-reference/crm/deals/events/index.html
+const DEAL_EVENTS = [
+  'ONCRMDEALUPDATE',
+];
+
 async function bindEvent(event, handler, event_type = 'online') {
   return await call(
     'event.bind',
@@ -78,6 +85,39 @@ async function unbindDynamicItemEvents(handlerUrl = null) {
   return { ok: true, handler, unbound: results };
 }
 
+async function bindDealEvents(handlerUrl = null) {
+  const handler = handlerUrl || buildHandlerUrl();
+
+  const results = [];
+  for (const ev of DEAL_EVENTS) {
+    const r = await bindEvent(ev, handler, 'online');
+    results.push({ event: ev, result: r });
+  }
+
+  return { ok: true, handler, bound: results };
+}
+
+async function unbindDealEvents(handlerUrl = null) {
+  const handler = handlerUrl || buildHandlerUrl();
+
+  const results = [];
+  for (const ev of DEAL_EVENTS) {
+    try {
+      const r = await unbindEvent(ev, handler);
+      results.push({ event: ev, result: r, ok: true });
+    } catch (e) {
+      results.push({
+        event: ev,
+        ok: false,
+        error: e?.message || String(e),
+        data: e?.data,
+      });
+    }
+  }
+
+  return { ok: true, handler, unbound: results };
+}
+
 // Backward compatibility (старые имена)
 async function bindDynamicItemUpdate(handlerUrl = null) {
   const handler = handlerUrl || buildHandlerUrl();
@@ -95,8 +135,11 @@ async function appInfo() {
 
 module.exports = {
   DYNAMIC_ITEM_EVENTS,
+  DEAL_EVENTS,
   bindDynamicItemEvents,
   unbindDynamicItemEvents,
+  bindDealEvents,
+  unbindDealEvents,
   bindDynamicItemUpdate,
   unbindDynamicItemUpdate,
   appInfo,

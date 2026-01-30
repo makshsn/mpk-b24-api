@@ -7,14 +7,18 @@ const { getInstall, setInstall, publicStatus } = require('../services/b24oauth/t
 const { exchangeCode } = require('../services/b24oauth/oauthApi');
 const {
   DYNAMIC_ITEM_EVENTS,
+  DEAL_EVENTS,
   bindDynamicItemEvents,
   unbindDynamicItemEvents,
+  bindDealEvents,
+  unbindDealEvents,
   appInfo,
   buildHandlerUrl,
 } = require('../services/b24oauth/eventBinder');
 const { normalizeEventPayload } = require('../services/b24oauth/eventPayload');
 const { call } = require('../services/b24oauth/restClient');
 const { enqueueDynamicItemEvent } = require('../modules/dynamicItems/dynamicItemEventProcessor.v1');
+const { enqueueDealEvent } = require('../modules/deals/dealEventProcessor.v1');
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -229,10 +233,13 @@ async function install(req, res, next) {
       updatedAt: new Date().toISOString(),
     });
 
-    // Bind events (SPA / dynamic items)
+    // Bind events (SPA / dynamic items + deals)
+    const handlerUrl = buildHandlerUrl();
+
     let unbindRes = null;
     let bindRes = null;
-    const handlerUrl = buildHandlerUrl();
+    let unbindDealRes = null;
+    let bindDealRes = null;
 
     try { unbindRes = await unbindDynamicItemEvents(handlerUrl); }
     catch (e) { unbindRes = { ok: false, error: e.message, data: e.data }; }
@@ -240,8 +247,21 @@ async function install(req, res, next) {
     try { bindRes = await bindDynamicItemEvents(handlerUrl); }
     catch (e) { bindRes = { ok: false, error: e.message, data: e.data }; }
 
+    try { unbindDealRes = await unbindDealEvents(handlerUrl); }
+    catch (e) { unbindDealRes = { ok: false, error: e.message, data: e.data }; }
+
+    try { bindDealRes = await bindDealEvents(handlerUrl); }
+    catch (e) { bindDealRes = { ok: false, error: e.message, data: e.data }; }
+
     log.info(
-      { portal: portalExpected, memberId, handlerUrl, restEndpoint: normalizedRestEndpoint, bindRes },
+      {
+        portal: portalExpected,
+        memberId,
+        handlerUrl,
+        restEndpoint: normalizedRestEndpoint,
+        bindRes,
+        bindDealRes,
+      },
       '[b24oauth] installed/bound'
     );
 
@@ -253,6 +273,8 @@ async function install(req, res, next) {
       appInfo: info,
       unbind: unbindRes,
       bind: bindRes,
+      unbindDeal: unbindDealRes,
+      bindDeal: bindDealRes,
     });
   } catch (e) {
     return next(e);
@@ -274,8 +296,10 @@ async function event(req, res, next) {
       return res.status(403).json({ ok: false, error: 'bad_application_token' });
     }
 
+    const ev = String(payload.event || '').trim().toUpperCase();
+
     log.info({
-      event: payload.event,
+      event: ev,
       entityTypeId: payload.entityTypeId,
       itemId: payload.itemId,
       memberId: payload.memberId,
@@ -283,7 +307,10 @@ async function event(req, res, next) {
       rawKeys: Object.keys(req.body || {}),
     }, '[b24oauth] event received');
 
-    const queued = enqueueDynamicItemEvent(payload);
+    const queued = DEAL_EVENTS.includes(ev)
+      ? enqueueDealEvent(payload)
+      : enqueueDynamicItemEvent(payload);
+
     return res.json({ ok: true, queued });
   } catch (e) {
     return next(e);
@@ -297,7 +324,7 @@ async function status(_req, res) {
 
 /**
  * Debug endpoint: list event subscriptions from portal (event.get)
- * Работает только в контексте авторизации приложения. :contentReference[oaicite:1]{index=1}
+ * Работает только в контексте авторизации приложения.
  */
 async function eventsList(_req, res, next) {
   try {
@@ -307,17 +334,25 @@ async function eventsList(_req, res, next) {
     const list = Array.isArray(items) ? items : [];
 
     const handlerUrl = buildHandlerUrl();
-    const filtered = list.filter((x) => {
+
+    const matchDynamicItemEvents = list.filter((x) => {
       const ev = String(x?.event || x?.EVENT || '').toUpperCase();
       const h = String(x?.handler || x?.HANDLER || '');
       return DYNAMIC_ITEM_EVENTS.includes(ev) && h === handlerUrl;
+    });
+
+    const matchDealEvents = list.filter((x) => {
+      const ev = String(x?.event || x?.EVENT || '').toUpperCase();
+      const h = String(x?.handler || x?.HANDLER || '');
+      return DEAL_EVENTS.includes(ev) && h === handlerUrl;
     });
 
     return res.json({
       ok: true,
       total: list.length,
       handlerUrl,
-      matchDynamicItemEvents: filtered,
+      matchDynamicItemEvents,
+      matchDealEvents,
       events: list,
     });
   } catch (e) {
@@ -327,7 +362,7 @@ async function eventsList(_req, res, next) {
 
 /**
  * Debug endpoint: force test event delivery (event.test)
- * Используется для проверки, что handler вообще способен принимать события. :contentReference[oaicite:2]{index=2}
+ * Используется для проверки, что handler вообще способен принимать события.
  */
 async function eventTest(_req, res, next) {
   try {
